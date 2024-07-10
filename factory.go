@@ -41,6 +41,13 @@ func createDefaultConfig() component.Config {
 			},
 			TracesURLPaths: defaultTracesURLPaths,
 		},
+		Resources: ResourcesConfig{
+			ServiceName: "data.service.name",
+		},
+		Scopes: ScopesConfig{
+			LibraryName:    "data.library.name",
+			LibraryVersion: "data.library.version",
+		},
 		Attributes: AttributesConfig{
 			TraceId:        "data.trace.trace_id",
 			SpanId:         "data.trace.span_id",

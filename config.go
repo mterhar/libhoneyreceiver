@@ -15,6 +15,7 @@ type Config struct {
 	HTTP       *HTTPConfig      `mapstructure:"http"`
 	Wrapper    string           `mapstructure:"wrapper"`
 	Resources  ResourcesConfig  `mapstructure:"resources"`
+	Scopes     ScopesConfig     `mapstructure:"scopes"`
 	Attributes AttributesConfig `mapstructure:"attributes"`
 }
 
@@ -29,16 +30,19 @@ type ResourcesConfig struct {
 	ServiceName string `mapstructure:"service_name"`
 }
 
+type ScopesConfig struct {
+	LibraryName    string `mapstructure:"library_name"`
+	LibraryVersion string `mapstructure:"library_version"`
+}
+
 type AttributesConfig struct {
-	TraceId         string   `mapstructure:"trace_id"`
-	ParentId        string   `mapstructure:"parent_id"`
-	SpanId          string   `mapstructure:"span_id"`
-	Name            string   `mapstructure:"name"`
-	Error           string   `mapstructure:"error"`
-	SpanKind        string   `mapstructure:"spankind"`
-	StarttimeFields []string `mapstructure:"starttimeFields"`
-	DurationFields  []string `mapstructure:"durationFields"`
-	EndtimeFields   []string `mapstructure:"endtimeFields"`
+	TraceId        string   `mapstructure:"trace_id"`
+	ParentId       string   `mapstructure:"parent_id"`
+	SpanId         string   `mapstructure:"span_id"`
+	Name           string   `mapstructure:"name"`
+	Error          string   `mapstructure:"error"`
+	SpanKind       string   `mapstructure:"spankind"`
+	DurationFields []string `mapstructure:"durationFields"`
 }
 
 func (cfg *Config) Validate() error {

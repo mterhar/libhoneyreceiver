@@ -230,6 +230,9 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 	// now instead of being a span level attribute.
 	slice := ptrace.NewSpanSlice()
 	count := 0
+	// foundServiceNames := []string{dataset}
+	foundLibraryName := "libhoney_receiver"
+	foundLibraryVersion := "1.0.0"
 
 	for _, span := range ss {
 		count += 1
@@ -278,6 +281,26 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 		if pid, ok := span.Data[cfg.Attributes.ParentId]; ok {
 			newSpan.SetParentSpanID(pcommon.SpanID(SpanIDFrom(pid.(string))))
 		}
+
+		if serviceName, ok := span.Data[cfg.Resources.ServiceName]; ok {
+			// this is to see if refinery emits 1 batch per dataset or if it relies on the service.name field
+			if serviceName.(string) != dataset {
+				newSpan.Attributes().PutStr("libhoney.receiver.service_name", serviceName.(string))
+			}
+		}
+		if libraryName, ok := span.Data[cfg.Scopes.LibraryName]; ok {
+			if libraryName != foundLibraryName {
+				newSpan.Attributes().PutStr("libhoney.receiver.library_name", libraryName.(string))
+			}
+			foundLibraryName = libraryName.(string)
+		}
+		if libraryVersion, ok := span.Data[cfg.Scopes.LibraryVersion]; ok {
+			if libraryVersion != foundLibraryName {
+				newSpan.Attributes().PutStr("libhoney.receiver.library_vesion", libraryVersion.(string))
+			}
+			foundLibraryVersion = libraryVersion.(string)
+		}
+
 		newSpan.SetName(span.Data[cfg.Attributes.Name].(string))
 		newSpan.Status().SetCode(ptrace.StatusCodeOk)
 
@@ -302,32 +325,26 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 
 		newSpan.Attributes().PutInt("SampleRate", int64(span.Samplerate))
 
-		already_used_fields := []string{
-			"time",
-			"samplerate",
-			"span.kind",
-			"error",
-			"name",
-			"trace.parent_id",
-			"duration_ms",
-			"trace.span_id",
-			"trace.trace_id",
-			"service.name",
-		}
+		already_used_fields := []string{cfg.Resources.ServiceName, cfg.Scopes.LibraryName, cfg.Scopes.LibraryVersion}
+		already_used_fields = append(already_used_fields, cfg.Attributes.Name,
+			cfg.Attributes.TraceId, cfg.Attributes.ParentId, cfg.Attributes.SpanId,
+			cfg.Attributes.Error, cfg.Attributes.SpanKind,
+		)
+		already_used_fields = append(already_used_fields, cfg.Attributes.DurationFields...)
 
 		for k, v := range span.Data {
 			if slices.Contains(already_used_fields, k) {
 				continue
 			}
-			switch v.(type) {
+			switch v := v.(type) {
 			case string:
-				newSpan.Attributes().PutStr(k, v.(string))
+				newSpan.Attributes().PutStr(k, v)
 			case int:
-				newSpan.Attributes().PutInt(k, v.(int64))
+				newSpan.Attributes().PutInt(k, int64(v))
 			case float64:
-				newSpan.Attributes().PutDouble(k, v.(float64))
+				newSpan.Attributes().PutDouble(k, v)
 			case bool:
-				newSpan.Attributes().PutBool(k, v.(bool))
+				newSpan.Attributes().PutBool(k, v)
 			default:
 				fmt.Fprintf(os.Stderr, "data type issue: %v is the key for type %t where value is %v", k, v, v)
 			}
@@ -341,8 +358,8 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 	rs.Resource().Attributes().PutStr(semconv.AttributeServiceName, dataset)
 
 	in := rs.ScopeSpans().AppendEmpty()
-	in.Scope().SetName("otelcol-libhoney-receiver") // should come from library.name ?
-	in.Scope().SetVersion("1.0.0")                  // should come from library.version?
+	in.Scope().SetName(foundLibraryName)
+	in.Scope().SetVersion(foundLibraryVersion)
 	slice.CopyTo(in.Spans())
 
 	return results, nil

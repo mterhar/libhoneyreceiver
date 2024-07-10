@@ -14,7 +14,10 @@ receivers:
         - "/event"
       include_metadata: true
     resources:
-      service_name: data.service_name
+      service_name: data.service.name
+    scopes:
+      library_name: data.library.name
+      library_version: data.library.version
     attributes:
       trace_id: data.trace_id
       parent_id: data.parent_id
