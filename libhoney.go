@@ -67,6 +67,8 @@ func (r *libhoneyReceiver) startHTTPServer(ctx context.Context, host component.H
 		for _, path := range r.cfg.HTTP.TracesURLPaths {
 			httpMux.HandleFunc(path, func(resp http.ResponseWriter, req *http.Request) {
 				handleTraces(resp, req, httpTracesReceiver, *r.cfg)
+				r.settings.Logger.Info("Adding path to HTTP server", zap.String("path", path))
+
 			})
 		}
 	}

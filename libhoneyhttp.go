@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"mime"
 	"net/http"
 	"net/url"
@@ -40,16 +41,30 @@ func handleTraces(resp http.ResponseWriter, req *http.Request, tracesReceiver *t
 		return
 	}
 
-	simpleSpans, err := readInput(resp, req, enc) // enc.unmarshalTracesRequest(body)
+	// simpleSpans, err := readInputPorgressively(resp, req, enc) // enc.unmarshalTracesRequest(body)
+	// if err != nil {
+	// 	writeError(resp, enc, err, http.StatusBadRequest)
+	// 	return
+	// }
+
+	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		writeError(resp, enc, err, http.StatusBadRequest)
-		return
+	}
+	if err = req.Body.Close(); err != nil {
+		writeError(resp, enc, err, http.StatusBadRequest)
 	}
 
 	dataset, _ := getDatasetFromRequest(req.URL.RawPath)
 	// if there's an error, maybe we should check inside the spans for a service.name?
 	for _, p := range cfg.HTTP.TracesURLPaths {
 		dataset = strings.Replace(dataset, p, "", 1)
+	}
+
+	simpleSpans := make([]simpleSpan, 0)
+	err = json.Unmarshal(body, &simpleSpans)
+	if err != nil {
+		writeError(resp, enc, err, http.StatusBadRequest)
 	}
 
 	otlpTraces, err := toTraces(dataset, simpleSpans, cfg)
@@ -74,7 +89,7 @@ func handleTraces(resp http.ResponseWriter, req *http.Request, tracesReceiver *t
 	writeResponse(resp, enc.contentType(), http.StatusOK, msg)
 }
 
-func readInput(resp http.ResponseWriter, req *http.Request, enc encoder) ([]simpleSpan, error) {
+func readInputProgressively(resp http.ResponseWriter, req *http.Request, enc encoder) ([]simpleSpan, error) {
 	simpleSpans := make([]simpleSpan, 0)
 	lineNum := 0
 	defer func() {
@@ -221,6 +236,20 @@ type simpleSpan struct {
 	Samplerate int                    `json:"samplerate"`
 	Time       string                 `json:"time"` // epoch miliseconds.nanoseconds
 	Data       map[string]interface{} `json:"data"`
+}
+
+// this should override unmarshall of spans to provide defaults
+func (s *simpleSpan) UnmarshallJSON(j []byte) error {
+	type _simpleSpan simpleSpan
+	tmp := _simpleSpan{Time: eventtime.GetEventTimeDefaultString(), Samplerate: 1}
+
+	err := json.Unmarshal(j, &tmp)
+	if err != nil {
+		return err
+	}
+
+	*s = simpleSpan(tmp)
+	return nil
 }
 
 func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error) {
