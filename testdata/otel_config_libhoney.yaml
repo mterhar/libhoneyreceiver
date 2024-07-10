@@ -1,0 +1,56 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  libhoney:
+    http:
+      endpoint: 0.0.0.0:8080
+      trace_url_paths:
+        - "/events"
+        - "/batch"
+        - "/event"
+      include_metadata: true
+    resources:
+      service_name: data.service_name
+    attributes:
+      trace_id: data.trace_id
+      parent_id: data.parent_id
+      span_id: data.span_id
+      name: data.name
+      error: data.error
+      spankind: data.span.kind
+      durationFields:
+        - duration_ms
+
+processors:
+  batch:
+
+exporters:
+  debug:
+    verbosity: detailed
+  
+
+extensions:
+  headers_setter:
+    headers:
+      - action: insert
+        key: x-honeycomb-team
+        from_context: x-honeycomb-team
+      - action: insert
+        key: x-honeycomb-dataset
+        from_context: x-honeycomb-dataset
+
+service:
+  extensions:
+    - headers_setter
+  pipelines:
+    traces:
+      receivers: [libhoney]
+      processors: [batch]
+      exporters: [debug]
+  telemetry:
+    logs:
+      level: debug
