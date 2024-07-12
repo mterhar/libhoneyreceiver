@@ -239,7 +239,7 @@ type simpleSpan struct {
 }
 
 // this should override unmarshall of spans to provide defaults
-func (s *simpleSpan) UnmarshallJSON(j []byte) error {
+func (s *simpleSpan) UnmarshalJSON(j []byte) error {
 	type _simpleSpan simpleSpan
 	tmp := _simpleSpan{Time: eventtime.GetEventTimeDefaultString(), Samplerate: 1}
 
