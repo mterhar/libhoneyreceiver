@@ -12,28 +12,7 @@ From Refinery, span information comes from a few sources:
 
 1. A header exist: `x-honeycomb-team` which is an API key
 2. A path element exists: `/events/{dataset_name}` which is analogous to `service.name` resource attribute in OTLP
-3. A JSON object like the following
-
-```json
-[
-  {
-    "samplerate": 30,
-    "time": 1719858203,
-    "data": {
-        "name": "Span Name",
-        "trace.trace_id": "3923a372ed02308",
-        "trace.span_id": "390230ffc3",
-        "random.data": 490,
-        "random.other": 320,
-        "duration_ms": 3932,
-        "service.name": "MikeServer",
-    }
-  },
-  {
-    // another span ...
-  }
-]
-```
+3. A webpack or json encoded body
 
 There is no support for span links, span events, metrics, or logs at this point.
 
@@ -64,7 +43,6 @@ libhoney:
       traces_url_paths:
         - "/1/events"
         - "/1/batch"
-        - "/1/event"
       include_metadata: true
     auth_api: https://api.honeycomb.io
     resources:
