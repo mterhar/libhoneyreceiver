@@ -12,7 +12,7 @@ From Refinery, span information comes from a few sources:
 
 1. A header exist: `x-honeycomb-team` which is an API key
 2. A path element exists: `/events/{dataset_name}` which is analogous to `service.name` resource attribute in OTLP
-3. A webpack or json encoded body
+3. A messagepack or json encoded body
 
 There is no support for span links, span events, metrics, or logs at this point.
 
