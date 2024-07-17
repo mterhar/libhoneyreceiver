@@ -1,59 +1,65 @@
 receivers:
-  otlp:
-    protocols:
-      grpc:
-        endpoint: 0.0.0.0:4317
-      http:
-        endpoint: 0.0.0.0:4318
   libhoney:
     http:
-      endpoint: 0.0.0.0:8080
-      trace_url_paths:
-        - "/events"
-        - "/batch"
-        - "/event"
+      endpoint: 0.0.0.0:8088
+      traces_url_paths:
+        - "/1/events/"
+        - "/1/batch/"
       include_metadata: true
+    auth_api: https://api.honeycomb.io
     resources:
-      service_name: data.service.name
+      service_name: service.name
     scopes:
-      library_name: data.library.name
-      library_version: data.library.version
+      library_name: library.name
+      library_version: library.version
     attributes:
-      trace_id: data.trace_id
-      parent_id: data.parent_id
-      span_id: data.span_id
-      name: data.name
-      error: data.error
-      spankind: data.span.kind
+      trace_id: trace_id
+      parent_id: parent_id
+      span_id: span_id
+      name: name
+      error: error
+      spankind: span.kind
       durationFields:
         - duration_ms
 
 processors:
   batch:
+    metadata_keys: 
+      - x-honeycomb-team
+    metadata_cardinality_limit: 30
+
+  transform:
+    error_mode: ignore
+    trace_statements:
+      - context: resource
+        statements:
+          - set(attributes["collector.after_refinery"], "${env:HOSTNAME}")
 
 exporters:
   debug:
     verbosity: detailed
-  
+  file:
+    path: ./output.json
+  otlp:
+    endpoint: "api.honeycomb.io:443"
+    auth:
+      authenticator: headers_setter
 
 extensions:
   headers_setter:
     headers:
-      - action: insert
+      - action: upsert
         key: x-honeycomb-team
         from_context: x-honeycomb-team
-      - action: insert
-        key: x-honeycomb-dataset
-        from_context: x-honeycomb-dataset
-
+    
 service:
-  extensions:
+  extensions: 
     - headers_setter
   pipelines:
     traces:
       receivers: [libhoney]
-      processors: [batch]
-      exporters: [debug]
+      processors: [transform, batch]
+      exporters: [otlp]
   telemetry:
     logs:
-      level: debug
+      level: info
