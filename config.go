@@ -13,6 +13,7 @@ import (
 // Config represents the receiver config settings within the collector's config.yaml
 type Config struct {
 	HTTP       *HTTPConfig      `mapstructure:"http"`
+	AuthApi    string           `mapstructure:"auth_api"`
 	Wrapper    string           `mapstructure:"wrapper"`
 	Resources  ResourcesConfig  `mapstructure:"resources"`
 	Scopes     ScopesConfig     `mapstructure:"scopes"`
@@ -69,6 +70,11 @@ func (cfg *Config) Unmarshal(conf *confmap.Conf) error {
 				return err
 			}
 		}
+	}
+	if cleanUrl, err := url.Parse(cfg.AuthApi); err != nil {
+		cfg.AuthApi = cleanUrl.String()
+	} else {
+		return err
 	}
 
 	return nil

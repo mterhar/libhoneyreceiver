@@ -36,6 +36,7 @@ var fallbackMsg = []byte(`{"code": 13, "message": "failed to marshal error messa
 const fallbackContentType = "application/json"
 
 func handleTraces(resp http.ResponseWriter, req *http.Request, tracesReceiver *trace.Receiver, cfg Config) {
+	fmt.Println("Got a thing!")
 	enc, ok := readContentType(resp, req)
 	if !ok {
 		return
@@ -330,26 +331,32 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 			foundLibraryVersion = libraryVersion.(string)
 		}
 
-		newSpan.SetName(span.Data[cfg.Attributes.Name].(string))
+		fmt.Printf("trying to add `Name` from attribute %s\n", cfg.Attributes.Name)
+		fmt.Printf("Here's what the span looks like: %#v \n", span)
+		spanName := span.Data[cfg.Attributes.Name].(string)
+		fmt.Printf("here's what the name is %s \n", spanName)
+		newSpan.SetName(spanName)
 		newSpan.Status().SetCode(ptrace.StatusCodeOk)
 
 		if _, ok := span.Data[cfg.Attributes.Error]; ok {
 			newSpan.Status().SetCode(ptrace.StatusCodeError)
 		}
 
-		switch span.Data[cfg.Attributes.SpanKind].(string) {
-		case "server":
-			newSpan.SetKind(ptrace.SpanKindServer)
-		case "client":
-			newSpan.SetKind(ptrace.SpanKindClient)
-		case "producer":
-			newSpan.SetKind(ptrace.SpanKindProducer)
-		case "consumer":
-			newSpan.SetKind(ptrace.SpanKindConsumer)
-		case "internal":
-			newSpan.SetKind(ptrace.SpanKindInternal)
-		default:
-			newSpan.SetKind(ptrace.SpanKindUnspecified)
+		if spanKind, ok := span.Data[cfg.Attributes.SpanKind]; ok {
+			switch spanKind.(string) {
+			case "server":
+				newSpan.SetKind(ptrace.SpanKindServer)
+			case "client":
+				newSpan.SetKind(ptrace.SpanKindClient)
+			case "producer":
+				newSpan.SetKind(ptrace.SpanKindProducer)
+			case "consumer":
+				newSpan.SetKind(ptrace.SpanKindConsumer)
+			case "internal":
+				newSpan.SetKind(ptrace.SpanKindInternal)
+			default:
+				newSpan.SetKind(ptrace.SpanKindUnspecified)
+			}
 		}
 
 		newSpan.Attributes().PutInt("SampleRate", int64(span.Samplerate))

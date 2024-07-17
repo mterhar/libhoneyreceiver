@@ -50,9 +50,10 @@ The following settings are required:
 - `scopes`: to get the `library.name` and `library.version` set in the scope section, set them here.
 - `attributes`: If the other trace-related data have different keys, map them here, defautls are otlp-like field names.
 
-The following settings can be optionally configured:
+The following setting is required for refinery traffic since:
 
-- `not sure yet`
+- `auth_api`: should be set to `https://api.honeycomb.io` or a proxy that forwards to that host.
+  Refinery checks with the `/1/auth` endpoint to get environment names so it needs to be passed through.
 
 Example:
 

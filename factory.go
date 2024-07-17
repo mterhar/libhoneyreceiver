@@ -41,6 +41,7 @@ func createDefaultConfig() component.Config {
 			},
 			TracesURLPaths: defaultTracesURLPaths,
 		},
+		AuthApi: "",
 		Resources: ResourcesConfig{
 			ServiceName: "data.service.name",
 		},
