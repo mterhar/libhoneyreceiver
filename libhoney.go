@@ -82,7 +82,7 @@ func (r *libhoneyReceiver) startHTTPServer(ctx context.Context, host component.H
 	httpMux := http.NewServeMux()
 	if r.nextTraces != nil {
 		httpTracesReceiver := trace.New(r.nextTraces, r.obsrepHTTP)
-		// r.settings.Logger.Debug("r.nextTraces is not null so httpTracesReciever was added", zap.Int("paths", len(r.cfg.HTTP.TracesURLPaths)))
+		r.settings.Logger.Info("r.nextTraces is not null so httpTracesReciever was added", zap.Int("paths", len(r.cfg.HTTP.TracesURLPaths)))
 		for _, path := range r.cfg.HTTP.TracesURLPaths {
 			httpMux.HandleFunc(path, func(resp http.ResponseWriter, req *http.Request) {
 				handleTraces(resp, req, httpTracesReceiver, *r.cfg)

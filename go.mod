@@ -5,6 +5,7 @@ go 1.21.11
 require (
 	github.com/gogo/protobuf v1.3.2
 	github.com/stretchr/testify v1.9.0
+	github.com/vmihailenco/msgpack/v5 v5.4.1
 	go.opentelemetry.io/collector/config/confighttp v0.104.0
 	go.opentelemetry.io/collector/confmap v0.104.0
 	go.opentelemetry.io/collector/consumer v0.104.0
@@ -24,6 +25,7 @@ require (
 	github.com/prometheus/common v0.54.0 // indirect
 	github.com/prometheus/procfs v0.15.0 // indirect
 	github.com/rogpeppe/go-internal v1.12.0 // indirect
+	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.opentelemetry.io/collector v0.104.0 // indirect
 	go.opentelemetry.io/collector/pdata/pprofile v0.104.0 // indirect
 	go.opentelemetry.io/otel v1.27.0 // indirect

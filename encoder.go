@@ -16,13 +16,15 @@ import (
 )
 
 const (
-	pbContentType   = "application/x-protobuf"
-	jsonContentType = "application/json"
+	pbContentType      = "application/x-protobuf"
+	jsonContentType    = "application/json"
+	msgpackContentType = "application/x-msgpack"
 )
 
 var (
 	jsEncoder       = &jsonEncoder{}
 	jsonPbMarshaler = &jsonpb.Marshaler{}
+	mpEncoder       = &msgpackEncoder{}
 )
 
 type encoder interface {
@@ -99,4 +101,47 @@ func (jsonEncoder) marshalStatus(resp *spb.Status) ([]byte, error) {
 
 func (jsonEncoder) contentType() string {
 	return jsonContentType
+}
+
+type msgpackEncoder struct{}
+
+// not really implemented because these aren't used by the libhoney receiver yet.
+func (msgpackEncoder) unmarshalTracesRequest(buf []byte) (ptraceotlp.ExportRequest, error) {
+	req := ptraceotlp.NewExportRequest()
+	err := req.UnmarshalJSON(buf)
+	return req, err
+}
+
+func (msgpackEncoder) unmarshalMetricsRequest(buf []byte) (pmetricotlp.ExportRequest, error) {
+	req := pmetricotlp.NewExportRequest()
+	err := req.UnmarshalJSON(buf)
+	return req, err
+}
+
+func (msgpackEncoder) unmarshalLogsRequest(buf []byte) (plogotlp.ExportRequest, error) {
+	req := plogotlp.NewExportRequest()
+	err := req.UnmarshalJSON(buf)
+	return req, err
+}
+
+func (msgpackEncoder) marshalTracesResponse(resp ptraceotlp.ExportResponse) ([]byte, error) {
+	return resp.MarshalJSON()
+}
+
+func (msgpackEncoder) marshalMetricsResponse(resp pmetricotlp.ExportResponse) ([]byte, error) {
+	return resp.MarshalJSON()
+}
+
+func (msgpackEncoder) marshalLogsResponse(resp plogotlp.ExportResponse) ([]byte, error) {
+	return resp.MarshalJSON()
+}
+
+func (msgpackEncoder) marshalStatus(resp *spb.Status) ([]byte, error) {
+	buf := new(bytes.Buffer)
+	err := jsonPbMarshaler.Marshal(buf, resp)
+	return buf.Bytes(), err
+}
+
+func (msgpackEncoder) contentType() string {
+	return msgpackContentType
 }

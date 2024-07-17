@@ -2,6 +2,7 @@ package libhoneyreceiver
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
@@ -28,6 +30,7 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/eventtime"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/httphelper"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/trace"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // Pre-computed status with code=Internal to be used in case of a marshaling error.
@@ -36,7 +39,7 @@ var fallbackMsg = []byte(`{"code": 13, "message": "failed to marshal error messa
 const fallbackContentType = "application/json"
 
 func handleTraces(resp http.ResponseWriter, req *http.Request, tracesReceiver *trace.Receiver, cfg Config) {
-	fmt.Println("Got a thing!")
+	// fmt.Println("Got a thing!")
 	enc, ok := readContentType(resp, req)
 	if !ok {
 		return
@@ -48,6 +51,12 @@ func handleTraces(resp http.ResponseWriter, req *http.Request, tracesReceiver *t
 	// 	return
 	// }
 
+	dataset, _ := getDatasetFromRequest(req.URL.RawPath)
+	// if there's an error, maybe we should check inside the spans for a service.name?
+	for _, p := range cfg.HTTP.TracesURLPaths {
+		dataset = strings.Replace(dataset, p, "", 1)
+	}
+
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		writeError(resp, enc, err, http.StatusBadRequest)
@@ -56,16 +65,17 @@ func handleTraces(resp http.ResponseWriter, req *http.Request, tracesReceiver *t
 		writeError(resp, enc, err, http.StatusBadRequest)
 	}
 
-	dataset, _ := getDatasetFromRequest(req.URL.RawPath)
-	// if there's an error, maybe we should check inside the spans for a service.name?
-	for _, p := range cfg.HTTP.TracesURLPaths {
-		dataset = strings.Replace(dataset, p, "", 1)
-	}
-
 	simpleSpans := make([]simpleSpan, 0)
-	err = json.Unmarshal(body, &simpleSpans)
-	if err != nil {
-		writeError(resp, enc, err, http.StatusBadRequest)
+	switch req.Header.Get("Content-Type") {
+	case "application/x-msgpack", "application/msgpack":
+		decoder := msgpack.NewDecoder(bytes.NewReader(body))
+		decoder.UseLooseInterfaceDecoding(true)
+		decoder.Decode(&simpleSpans)
+	case jsonContentType:
+		err = json.Unmarshal(body, &simpleSpans)
+		if err != nil {
+			writeError(resp, enc, err, http.StatusBadRequest)
+		}
 	}
 
 	otlpTraces, err := toTraces(dataset, simpleSpans, cfg)
@@ -163,6 +173,8 @@ func readContentType(resp http.ResponseWriter, req *http.Request) (encoder, bool
 	switch getMimeTypeFromContentType(req.Header.Get("Content-Type")) {
 	case jsonContentType:
 		return jsEncoder, true
+	case "application/x-msgpack", "application/msgpack":
+		return mpEncoder, true
 	default:
 		handleUnmatchedContentType(resp)
 		return nil, false
@@ -234,9 +246,10 @@ func getDatasetFromRequest(path string) (string, error) {
 }
 
 type simpleSpan struct {
-	Samplerate int                    `json:"samplerate"`
-	Time       string                 `json:"time"` // epoch miliseconds.nanoseconds
-	Data       map[string]interface{} `json:"data"`
+	Samplerate       int                    `json:"samplerate" msgpack:"samplerate"`
+	MsgPackTimestamp *time.Time             `msgpack:"time,omitempty"`
+	Time             string                 `json:"time"` // epoch miliseconds.nanoseconds
+	Data             map[string]interface{} `json:"data" msgpack:"data"`
 }
 
 // this should override unmarshall of spans to provide defaults
@@ -263,12 +276,12 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 	// foundServiceNames := []string{dataset}
 	foundLibraryName := "libhoney_receiver"
 	foundLibraryVersion := "1.0.0"
+	foundServiceName := dataset
 
 	for _, span := range ss {
 		count += 1
 		newSpan := slice.AppendEmpty()
 		time_ns := eventtime.GetEventTimeNano(span.Time)
-		// fmt.Fprintf(os.Stderr, "Old time (s): %d \nOffset (s): %d\nNew time (ns): %d\n", uint64(time_s*1000000000), secondsOffset, time_ns)
 
 		duration_ms := 0.0
 		for _, df := range cfg.Attributes.DurationFields {
@@ -282,7 +295,6 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 		if tid, ok := span.Data[cfg.Attributes.TraceId]; ok {
 			tid := strings.Replace(tid.(string), "-", "", -1)
 			if len(tid) > 32 {
-				// fmt.Println("SpanID was too long now it's shortened to: %v", sid)
 				tid = tid[0:32]
 			}
 			newTraceId := pcommon.TraceID(TraceIDFrom(tid))
@@ -294,10 +306,8 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 		if sid, ok := span.Data[cfg.Attributes.SpanId]; ok {
 			sid := strings.Replace(sid.(string), "-", "", -1)
 			if len(sid) == 32 {
-				// take the middle
 				sid = sid[8:24]
 			} else if len(sid) > 16 {
-				// fmt.Println("SpanID was too long now it's shortened to: %v", sid)
 				sid = sid[0:16]
 			}
 			newTraceId := pcommon.SpanID(SpanIDFrom(sid))
@@ -313,8 +323,9 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 		}
 
 		if serviceName, ok := span.Data[cfg.Resources.ServiceName]; ok {
-			// this is to see if refinery emits 1 batch per dataset or if it relies on the service.name field
 			if serviceName.(string) != dataset {
+				foundServiceName = serviceName.(string)
+				newSpan.Attributes().PutStr("libhoney.receiver.dataset", dataset)
 				newSpan.Attributes().PutStr("libhoney.receiver.service_name", serviceName.(string))
 			}
 		}
@@ -331,11 +342,9 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 			foundLibraryVersion = libraryVersion.(string)
 		}
 
-		fmt.Printf("trying to add `Name` from attribute %s\n", cfg.Attributes.Name)
-		fmt.Printf("Here's what the span looks like: %#v \n", span)
-		spanName := span.Data[cfg.Attributes.Name].(string)
-		fmt.Printf("here's what the name is %s \n", spanName)
-		newSpan.SetName(spanName)
+		if spanName, ok := span.Data[cfg.Attributes.Name]; ok {
+			newSpan.SetName(spanName.(string))
+		}
 		newSpan.Status().SetCode(ptrace.StatusCodeOk)
 
 		if _, ok := span.Data[cfg.Attributes.Error]; ok {
@@ -377,6 +386,9 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 				newSpan.Attributes().PutStr(k, v)
 			case int:
 				newSpan.Attributes().PutInt(k, int64(v))
+			case int64, int16, int32:
+				intv := v.(int64)
+				newSpan.Attributes().PutInt(k, intv)
 			case float64:
 				newSpan.Attributes().PutDouble(k, v)
 			case bool:
@@ -391,7 +403,7 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 	rs := results.ResourceSpans().AppendEmpty()
 	rs.SetSchemaUrl(semconv.SchemaURL)
 	// sharedAttributes.CopyTo(rs.Resource().Attributes())
-	rs.Resource().Attributes().PutStr(semconv.AttributeServiceName, dataset)
+	rs.Resource().Attributes().PutStr(semconv.AttributeServiceName, foundServiceName)
 
 	in := rs.ScopeSpans().AppendEmpty()
 	in.Scope().SetName(foundLibraryName)
