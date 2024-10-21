@@ -456,7 +456,8 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 				linkedSpanID := pcommon.SpanID(SpanIDFrom(spl.Data["trace.link.span_id"].(string)))
 				newLink.SetSpanID(linkedSpanID)
 				for lkey, lval := range spl.Data {
-					if lkey[:11] == "trace.link." {
+
+					if len(lkey) > 10 && lkey[:11] == "trace.link." {
 						continue
 					}
 					if slices.Contains(already_used_fields, lkey) {
