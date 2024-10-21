@@ -278,10 +278,37 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 	foundLibraryVersion := "1.0.0"
 	foundServiceName := dataset
 
+	spanLinks := map[trc.SpanID][]simpleSpan{}
+	spanEvents := map[trc.SpanID][]simpleSpan{}
+
+	already_used_fields := []string{cfg.Resources.ServiceName, cfg.Scopes.LibraryName, cfg.Scopes.LibraryVersion}
+	already_used_fields = append(already_used_fields, cfg.Attributes.Name,
+		cfg.Attributes.TraceId, cfg.Attributes.ParentId, cfg.Attributes.SpanId,
+		cfg.Attributes.Error, cfg.Attributes.SpanKind,
+	)
+	already_used_fields = append(already_used_fields, cfg.Attributes.DurationFields...)
+
 	for _, span := range ss {
 		count += 1
 		newSpan := slice.AppendEmpty()
 		time_ns := eventtime.GetEventTimeNano(span.Time)
+
+		var parent_id trc.SpanID
+		if pid, ok := span.Data[cfg.Attributes.ParentId]; ok {
+			parent_id = SpanIDFrom(pid.(string))
+			newSpan.SetParentSpanID(pcommon.SpanID(parent_id))
+		}
+		// find span events and span links
+		if mat, ok := span.Data["meta.annotation_type"]; ok {
+			switch mat {
+			case "span_link":
+				spanLinks[parent_id] = append(spanLinks[parent_id], span)
+				continue
+			case "span_event":
+				spanEvents[parent_id] = append(spanEvents[parent_id], span)
+				continue
+			}
+		}
 
 		duration_ms := 0.0
 		for _, df := range cfg.Attributes.DurationFields {
@@ -310,17 +337,14 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 			} else if len(sid) > 16 {
 				sid = sid[0:16]
 			}
-			newTraceId := pcommon.SpanID(SpanIDFrom(sid))
-			newSpan.SetSpanID(newTraceId)
+			newSpanId := pcommon.SpanID(SpanIDFrom(sid))
+			newSpan.SetSpanID(newSpanId)
 		} else {
 			newSpan.SetSpanID(pcommon.SpanID(fakeMeAnId(16)))
 		}
 
 		newSpan.SetStartTimestamp(pcommon.Timestamp(time_ns))
 		newSpan.SetEndTimestamp(pcommon.Timestamp(end_timestamp))
-		if pid, ok := span.Data[cfg.Attributes.ParentId]; ok {
-			newSpan.SetParentSpanID(pcommon.SpanID(SpanIDFrom(pid.(string))))
-		}
 
 		if serviceName, ok := span.Data[cfg.Resources.ServiceName]; ok {
 			if serviceName.(string) != dataset {
@@ -370,13 +394,6 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 
 		newSpan.Attributes().PutInt("SampleRate", int64(span.Samplerate))
 
-		already_used_fields := []string{cfg.Resources.ServiceName, cfg.Scopes.LibraryName, cfg.Scopes.LibraryVersion}
-		already_used_fields = append(already_used_fields, cfg.Attributes.Name,
-			cfg.Attributes.TraceId, cfg.Attributes.ParentId, cfg.Attributes.SpanId,
-			cfg.Attributes.Error, cfg.Attributes.SpanKind,
-		)
-		already_used_fields = append(already_used_fields, cfg.Attributes.DurationFields...)
-
 		for k, v := range span.Data {
 			if slices.Contains(already_used_fields, k) {
 				continue
@@ -395,6 +412,72 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 				newSpan.Attributes().PutBool(k, v)
 			default:
 				fmt.Fprintf(os.Stderr, "data type issue: %v is the key for type %t where value is %v", k, v, v)
+			}
+		}
+	}
+
+	// add span links and events back
+	// i'd like to only loop through the span events and links arrays but don't see a way to address the slices
+	for i := 0; i < slice.Len(); i++ {
+		sp := slice.At(i)
+		spId := trc.SpanID(sp.SpanID())
+		if speArr, ok := spanEvents[spId]; ok {
+			for _, spe := range speArr {
+				newEvent := sp.Events().AppendEmpty()
+				newEvent.SetTimestamp(pcommon.Timestamp(eventtime.GetEventTimeNano(spe.Time)))
+				newEvent.SetName(spe.Data["name"].(string))
+				for lkey, lval := range spe.Data {
+					if slices.Contains(already_used_fields, lkey) {
+						continue
+					}
+					switch lval := lval.(type) {
+					case string:
+						newEvent.Attributes().PutStr(lkey, lval)
+					case int:
+						newEvent.Attributes().PutInt(lkey, int64(lval))
+					case int64, int16, int32:
+						intv := lval.(int64)
+						newEvent.Attributes().PutInt(lkey, intv)
+					case float64:
+						newEvent.Attributes().PutDouble(lkey, lval)
+					case bool:
+						newEvent.Attributes().PutBool(lkey, lval)
+					default:
+						fmt.Fprintf(os.Stderr, "data type issue in span event: %v is the key for type %t where value is %v", lkey, lval, lval)
+					}
+				}
+			}
+		}
+		if splArr, ok := spanLinks[spId]; ok {
+			for _, spl := range splArr {
+				newLink := sp.Links().AppendEmpty()
+				linkedTraceID := pcommon.TraceID(TraceIDFrom(spl.Data["trace.link.trace_id"].(string)))
+				newLink.SetTraceID(linkedTraceID)
+				linkedSpanID := pcommon.SpanID(SpanIDFrom(spl.Data["trace.link.span_id"].(string)))
+				newLink.SetSpanID(linkedSpanID)
+				for lkey, lval := range spl.Data {
+					if lkey[:11] == "trace.link." {
+						continue
+					}
+					if slices.Contains(already_used_fields, lkey) {
+						continue
+					}
+					switch lval := lval.(type) {
+					case string:
+						newLink.Attributes().PutStr(lkey, lval)
+					case int:
+						newLink.Attributes().PutInt(lkey, int64(lval))
+					case int64, int16, int32:
+						intv := lval.(int64)
+						newLink.Attributes().PutInt(lkey, intv)
+					case float64:
+						newLink.Attributes().PutDouble(lkey, lval)
+					case bool:
+						newLink.Attributes().PutBool(lkey, lval)
+					default:
+						fmt.Fprintf(os.Stderr, "data type issue in span link: %v is the key for type %t where value is %v", lkey, lval, lval)
+					}
+				}
 			}
 		}
 	}

@@ -73,7 +73,6 @@ func createTraces(
 		func() (*libhoneyReceiver, error) {
 			return newLibhoneyReceiver(oCfg, &set)
 		},
-		&set.TelemetrySettings,
 	)
 	if err != nil {
 		return nil, err
