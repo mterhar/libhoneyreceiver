@@ -430,6 +430,9 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 					if slices.Contains(already_used_fields, lkey) {
 						continue
 					}
+					if lkey == "meta.annotation_type" || lkey == "meta.signal_type" {
+						continue
+					}
 					switch lval := lval.(type) {
 					case string:
 						newEvent.Attributes().PutStr(lkey, lval)
@@ -461,6 +464,9 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 						continue
 					}
 					if slices.Contains(already_used_fields, lkey) {
+						continue
+					}
+					if lkey == "meta.annotation_type" || lkey == "meta.signal_type" {
 						continue
 					}
 					switch lval := lval.(type) {

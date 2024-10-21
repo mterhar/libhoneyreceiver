@@ -14,10 +14,8 @@ From Refinery, span information comes from a few sources:
 2. A path element exists: `/events/{dataset_name}` which is analogous to `service.name` resource attribute in OTLP
 3. A messagepack or json encoded body
 
-There is no support for span links, span events, metrics, or logs at this point.
-
-If span links and span events are flowing through this back into Honeycomb, they'll look like they always do in Honeycomb.
-It doesn't currently reattach span links or events in to the span's child arrays.
+There is no support for metrics, or logs at this point.
+Span events and links need to be in the same batch as the span they attach to.
 
 ## Getting Started
 
@@ -74,10 +72,6 @@ If the `time` field is missing, it uses `time.Now()` which shouldn't ever happen
 ## Unsupported stuff
 
 There are several aspects of opentelemtry that aren't or can't be supported because we are going from a low-fidelity signal to a higher fidelity signal.  OTLP is more expressive what Refinery emits as of 2.6.1.
-
-### No span events or links
-
-These are children of spans in a separate array in OTLP. Some backends may be able to have span events or span links replicated but this receiver won't try to make them back into OTLP-style child arrays.
 
 ### Set arbitrary values
 

@@ -29,7 +29,8 @@
             "duration_ms": 3932,
             "library.name": "hacky_nonsense",
             "library.version": "v0.0.-1",
-            "service.name": "certainly-not-curl"
+            "service.name": "certainly-not-curl",
+            "event_attribute": 1
         }
     },
     {
@@ -48,7 +49,8 @@
             "duration_ms": 3932,
             "library.name": "hacky_nonsense",
             "library.version": "v0.0.-1",
-            "service.name": "certainly-not-curl"
+            "service.name": "certainly-not-curl",
+            "link_attribute": "special"
         }
     }
 ]
