@@ -33,31 +33,34 @@ dist:
   name: otelcol-dev
   description: Libhoney testing collector
   output_path: ./otelcol-dev
-  version: 0.104.0
-  otelcol_version: 0.104.0
+  version: 0.111.0
+  otelcol_version: 0.111.0
+  debug_compilation: true
 
 extensions:
-  - gomod: go.opentelemetry.io/collector/extension/zpagesextension v0.104.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/basicauthextension v0.104.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/bearertokenauthextension v0.104.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/headerssetterextension v0.104.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/healthcheckextension v0.104.0
+  - gomod: go.opentelemetry.io/collector/extension/zpagesextension v0.111.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/basicauthextension v0.111.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/bearertokenauthextension v0.111.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/headerssetterextension v0.111.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/healthcheckextension v0.111.0
 
 exporters:
-  - gomod: go.opentelemetry.io/collector/exporter/debugexporter v0.104.0
-  - gomod: go.opentelemetry.io/collector/exporter/otlpexporter v0.104.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/fileexporter v0.104.0
+  - gomod: go.opentelemetry.io/collector/exporter/debugexporter v0.111.0
+  - gomod: go.opentelemetry.io/collector/exporter/otlpexporter v0.111.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/fileexporter v0.111.0
 
 processors:
-  - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.104.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/transformprocessor v0.104.0
+  - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.111.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/transformprocessor v0.111.0
 
 receivers:
-  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.104.0
+  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.111.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver v0.0.1
+    path: libhoney
 
 connectors:
-  - gomod: go.opentelemetry.io/collector/connector/forwardconnector v0.104.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/connector/routingconnector v0.104.0
+  - gomod: go.opentelemetry.io/collector/connector/forwardconnector v0.111.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/connector/routingconnector v0.111.0
 ```
 
 And manually added the libhoney receiver to the `components.go` file as suggested in the dock referenced above.
@@ -65,7 +68,7 @@ And manually added the libhoney receiver to the `components.go` file as suggeste
 Root's `go.work` file:
 
 ```go
-go 1.21.11
+go 1.23
 
 use (
     ./libhoney
@@ -84,6 +87,38 @@ Since the whole libhoney repo is just called by the oteldev-col repo, building i
 In the root directory, run `go run ./otelcol-dev --config ./libhoney/testdata/otel_config_libhoney.yaml`
 
 This should start it up with enough configurations to pass libhoney events through.
+
+## Troubleshooting with Delve 
+
+If you have `debug_compilation: true` in your builder-config.yaml under `dist:`, you can connect delve to the running process.
+
+```shell
+dlv --listen=:2345 --headless=true --api-version=2 --accept-multiclient --log exec ./otelcol-dev/otelcol-dev -- --config=libhoney/testdata/otel_config_libhoney.yaml
+```
+
+Add this to your `.vscode/launch.json` file:
+
+```json
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Connect to server",
+            "type": "go",
+            "request": "attach",
+            "mode": "remote",
+            "port": 2345,
+            "host": "127.0.0.1",
+            "apiVersion": 2,
+            "showLog": true
+        }
+    ]
+}
+```
+
+Once delve is connected, you should see the debug console stuff streaming by.
+
+Exiting the process requires `killall dlv` since ctrl-c only kills the child process and not Delve itself.
 
 ## Test pipeline
 
