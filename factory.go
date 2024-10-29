@@ -27,6 +27,7 @@ func NewFactory() receiver.Factory {
 		metadata.Type,
 		createDefaultConfig,
 		receiver.WithTraces(createTraces, metadata.TracesStability),
+		receiver.WithLogs(createLogs, metadata.LogsStability),
 	)
 }
 
@@ -43,21 +44,43 @@ func createDefaultConfig() component.Config {
 		},
 		AuthApi: "",
 		Resources: ResourcesConfig{
-			ServiceName: "data.service.name",
+			ServiceName: "service.name",
 		},
 		Scopes: ScopesConfig{
-			LibraryName:    "data.library.name",
-			LibraryVersion: "data.library.version",
+			LibraryName:    "library.name",
+			LibraryVersion: "library.version",
 		},
 		Attributes: AttributesConfig{
-			TraceId:        "data.trace.trace_id",
-			SpanId:         "data.trace.span_id",
-			ParentId:       "data.trace.parent_id",
-			Name:           "data.name",
-			SpanKind:       "data.span.kind",
+			TraceId:        "trace.trace_id",
+			SpanId:         "trace.span_id",
+			ParentId:       "trace.parent_id",
+			Name:           "name",
+			Error:			"error",
+			SpanKind:       "span.kind",
 			DurationFields: durationFieldsArr,
 		},
 	}
+}
+
+func createLogs(
+	_ context.Context, 
+	set receiver.Settings, 
+	cfg component.Config, 
+	nextConsumer consumer.Logs,
+) (receiver.Logs, error) {
+	oCfg := cfg.(*Config)
+	r, err := receivers.LoadOrStore(
+		oCfg,
+		func() (*libhoneyReceiver, error) {
+			return newLibhoneyReceiver(oCfg, &set)
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	r.Unwrap().registerLogsConsumer(nextConsumer)
+	return r, nil	
 }
 
 // createTraces creates a trace receiver based on provided config.

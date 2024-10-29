@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/plog/plogotlp"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	semconv "go.opentelemetry.io/collector/semconv/v1.16.0"
 	trc "go.opentelemetry.io/otel/trace"
@@ -29,6 +31,7 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/errors"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/eventtime"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/httphelper"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/logs"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/trace"
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -38,7 +41,7 @@ var fallbackMsg = []byte(`{"code": 13, "message": "failed to marshal error messa
 
 const fallbackContentType = "application/json"
 
-func handleTraces(resp http.ResponseWriter, req *http.Request, tracesReceiver *trace.Receiver, cfg Config) {
+func handleSomething(resp http.ResponseWriter, req *http.Request, tracesReceiver *trace.Receiver, logsReceiver *logs.Receiver, cfg Config) {
 	// fmt.Println("Got a thing!")
 	enc, ok := readContentType(resp, req)
 	if !ok {
@@ -78,15 +81,15 @@ func handleTraces(resp http.ResponseWriter, req *http.Request, tracesReceiver *t
 		}
 	}
 
-	otlpTraces, err := toTraces(dataset, simpleSpans, cfg)
+	otlpTraces, otlpLogs, err := toPsomething(dataset, simpleSpans, cfg)
 	if err != nil {
 		writeError(resp, enc, err, http.StatusBadRequest)
 		return
 	}
 
-	otlpReq := ptraceotlp.NewExportRequestFromTraces(otlpTraces)
+	otlpReqTrace := ptraceotlp.NewExportRequestFromTraces(otlpTraces)
 
-	otlpResp, err := tracesReceiver.Export(req.Context(), otlpReq)
+	otlpResp, err := tracesReceiver.Export(req.Context(), otlpReqTrace)
 	if err != nil {
 		writeError(resp, enc, err, http.StatusInternalServerError)
 		return
@@ -97,6 +100,21 @@ func handleTraces(resp http.ResponseWriter, req *http.Request, tracesReceiver *t
 		writeError(resp, enc, err, http.StatusInternalServerError)
 		return
 	}
+
+	otlpReqLog := plogotlp.NewExportRequestFromLogs(otlpLogs)
+
+	otlpLogResp, err := logsReceiver.Export(req.Context(), otlpReqLog)
+	if err != nil {
+		writeError(resp, enc, err, http.StatusInternalServerError)
+		return
+	}
+
+	_, err = enc.marshalLogsResponse(otlpLogResp)
+	if err != nil {
+		writeError(resp, enc, err, http.StatusInternalServerError)
+		return
+	}
+
 	writeResponse(resp, enc.contentType(), http.StatusOK, msg)
 }
 
@@ -266,12 +284,13 @@ func (s *simpleSpan) UnmarshalJSON(j []byte) error {
 	return nil
 }
 
-func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error) {
+func toPsomething(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, plog.Logs, error) {
 	// Creating a map of service spans to slices
 	// since the expectation is that `service.name`
 	// is added as a resource attribute in most systems
 	// now instead of being a span level attribute.
-	slice := ptrace.NewSpanSlice()
+	traceSlice := ptrace.NewSpanSlice()
+	logSlice := plog.NewLogRecordSlice()
 	count := 0
 	// foundServiceNames := []string{dataset}
 	foundLibraryName := "libhoney_receiver"
@@ -290,7 +309,7 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 
 	for _, span := range ss {
 		count += 1
-		newSpan := slice.AppendEmpty()
+		newSpan := traceSlice.AppendEmpty()
 		time_ns := eventtime.GetEventTimeNano(span.Time)
 
 		var parent_id trc.SpanID
@@ -418,8 +437,8 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 
 	// add span links and events back
 	// i'd like to only loop through the span events and links arrays but don't see a way to address the slices
-	for i := 0; i < slice.Len(); i++ {
-		sp := slice.At(i)
+	for i := 0; i < traceSlice.Len(); i++ {
+		sp := traceSlice.At(i)
 		spId := trc.SpanID(sp.SpanID())
 		if speArr, ok := spanEvents[spId]; ok {
 			for _, spe := range speArr {
@@ -489,8 +508,8 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 		}
 	}
 
-	results := ptrace.NewTraces()
-	rs := results.ResourceSpans().AppendEmpty()
+	resultTraces := ptrace.NewTraces()
+	rs := resultTraces.ResourceSpans().AppendEmpty()
 	rs.SetSchemaUrl(semconv.SchemaURL)
 	// sharedAttributes.CopyTo(rs.Resource().Attributes())
 	rs.Resource().Attributes().PutStr(semconv.AttributeServiceName, foundServiceName)
@@ -498,7 +517,17 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 	in := rs.ScopeSpans().AppendEmpty()
 	in.Scope().SetName(foundLibraryName)
 	in.Scope().SetVersion(foundLibraryVersion)
-	slice.CopyTo(in.Spans())
+	traceSlice.CopyTo(in.Spans())
 
-	return results, nil
+	resultLogs := plog.NewLogs()
+	lr := resultLogs.ResourceLogs().AppendEmpty()
+	lr.SetSchemaUrl(semconv.SchemaURL)
+	lr.Resource().Attributes().PutStr(semconv.AttributeServiceName, foundServiceName)
+
+	ls := lr.ScopeLogs().AppendEmpty()
+	ls.Scope().SetName(foundLibraryName)
+	ls.Scope().SetVersion(foundLibraryVersion)
+	logSlice.CopyTo(ls.LogRecords())
+
+	return resultTraces, resultLogs, nil
 }

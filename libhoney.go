@@ -14,6 +14,7 @@ import (
 
 	"go.uber.org/zap"
 
+	logs "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/logs"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/trace"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componentstatus"
@@ -29,6 +30,7 @@ type libhoneyReceiver struct {
 	serverHTTP *http.Server
 
 	nextTraces consumer.Traces
+	nextLogs   consumer.Logs
 	shutdownWG sync.WaitGroup
 
 	obsrepHTTP *receiverhelper.ObsReport
@@ -83,10 +85,12 @@ func (r *libhoneyReceiver) startHTTPServer(ctx context.Context, host component.H
 	httpMux := http.NewServeMux()
 	if r.nextTraces != nil {
 		httpTracesReceiver := trace.New(r.nextTraces, r.obsrepHTTP)
+		httpLogsReceiver := logs.New(r.nextLogs, r.obsrepHTTP)
+
 		r.settings.Logger.Info("r.nextTraces is not null so httpTracesReciever was added", zap.Int("paths", len(r.cfg.HTTP.TracesURLPaths)))
 		for _, path := range r.cfg.HTTP.TracesURLPaths {
 			httpMux.HandleFunc(path, func(resp http.ResponseWriter, req *http.Request) {
-				handleTraces(resp, req, httpTracesReceiver, *r.cfg)
+				handleSomething(resp, req, httpTracesReceiver, httpLogsReceiver, *r.cfg)
 			})
 			r.settings.Logger.Debug("Added path to HTTP server", zap.String("path", path))
 		}
@@ -174,4 +178,8 @@ func (r *libhoneyReceiver) Shutdown(ctx context.Context) error {
 
 func (r *libhoneyReceiver) registerTraceConsumer(tc consumer.Traces) {
 	r.nextTraces = tc
+}
+
+func (r *libhoneyReceiver) registerLosConsumer(tc consumer.Logs) {
+	r.nextLogs = tc
 }
