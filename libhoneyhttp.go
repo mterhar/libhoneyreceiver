@@ -48,12 +48,6 @@ func handleSomething(resp http.ResponseWriter, req *http.Request, tracesReceiver
 		return
 	}
 
-	// simpleSpans, err := readInputPorgressively(resp, req, enc) // enc.unmarshalTracesRequest(body)
-	// if err != nil {
-	// 	writeError(resp, enc, err, http.StatusBadRequest)
-	// 	return
-	// }
-
 	dataset, _ := getDatasetFromRequest(req.URL.RawPath)
 	// if there's an error, maybe we should check inside the spans for a service.name?
 	for _, p := range cfg.HTTP.TracesURLPaths {
@@ -308,129 +302,216 @@ func toPsomething(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, p
 	already_used_fields = append(already_used_fields, cfg.Attributes.DurationFields...)
 
 	for _, span := range ss {
+		signal := "log"
+		if count == 0 {
+			// We need to take a peek and see if meta.signal_type is "trace" or "log"
+			// I don't think these can be mixed in the same request... I hope.
+			if sig, ok := span.Data["meta.signal_type"]; ok {
+				if sig == "trace" {
+					signal = "trace"
+				}
+			}
+		}
 		count += 1
-		newSpan := traceSlice.AppendEmpty()
-		time_ns := eventtime.GetEventTimeNano(span.Time)
 
-		var parent_id trc.SpanID
-		if pid, ok := span.Data[cfg.Attributes.ParentId]; ok {
-			parent_id = SpanIDFrom(pid.(string))
-			newSpan.SetParentSpanID(pcommon.SpanID(parent_id))
-		}
-		// find span events and span links
-		if mat, ok := span.Data["meta.annotation_type"]; ok {
-			switch mat {
-			case "span_link":
-				spanLinks[parent_id] = append(spanLinks[parent_id], span)
-				continue
-			case "span_event":
-				spanEvents[parent_id] = append(spanEvents[parent_id], span)
-				continue
-			}
-		}
+		if signal == "trace" {
 
-		duration_ms := 0.0
-		for _, df := range cfg.Attributes.DurationFields {
-			if duration, okay := span.Data[df]; okay {
-				duration_ms = duration.(float64)
-				break
-			}
-		}
-		end_timestamp := time_ns + (int64(duration_ms) * 1000000)
+			newSpan := traceSlice.AppendEmpty()
+			time_ns := eventtime.GetEventTimeNano(span.Time)
 
-		if tid, ok := span.Data[cfg.Attributes.TraceId]; ok {
-			tid := strings.Replace(tid.(string), "-", "", -1)
-			if len(tid) > 32 {
-				tid = tid[0:32]
+			var parent_id trc.SpanID
+			if pid, ok := span.Data[cfg.Attributes.ParentId]; ok {
+				parent_id = SpanIDFrom(pid.(string))
+				newSpan.SetParentSpanID(pcommon.SpanID(parent_id))
 			}
-			newTraceId := pcommon.TraceID(TraceIDFrom(tid))
-			newSpan.SetTraceID(newTraceId)
+			// find span events and span links
+			if mat, ok := span.Data["meta.annotation_type"]; ok {
+				switch mat {
+				case "span_link":
+					spanLinks[parent_id] = append(spanLinks[parent_id], span)
+					continue
+				case "span_event":
+					spanEvents[parent_id] = append(spanEvents[parent_id], span)
+					continue
+				}
+			}
+
+			duration_ms := 0.0
+			for _, df := range cfg.Attributes.DurationFields {
+				if duration, okay := span.Data[df]; okay {
+					duration_ms = duration.(float64)
+					break
+				}
+			}
+			end_timestamp := time_ns + (int64(duration_ms) * 1000000)
+
+			if tid, ok := span.Data[cfg.Attributes.TraceId]; ok {
+				tid := strings.Replace(tid.(string), "-", "", -1)
+				if len(tid) > 32 {
+					tid = tid[0:32]
+				}
+				newTraceId := pcommon.TraceID(TraceIDFrom(tid))
+				newSpan.SetTraceID(newTraceId)
+			} else {
+				newSpan.SetTraceID(pcommon.TraceID(fakeMeAnId(32)))
+			}
+
+			if sid, ok := span.Data[cfg.Attributes.SpanId]; ok {
+				sid := strings.Replace(sid.(string), "-", "", -1)
+				if len(sid) == 32 {
+					sid = sid[8:24]
+				} else if len(sid) > 16 {
+					sid = sid[0:16]
+				}
+				newSpanId := pcommon.SpanID(SpanIDFrom(sid))
+				newSpan.SetSpanID(newSpanId)
+			} else {
+				newSpan.SetSpanID(pcommon.SpanID(fakeMeAnId(16)))
+			}
+
+			newSpan.SetStartTimestamp(pcommon.Timestamp(time_ns))
+			newSpan.SetEndTimestamp(pcommon.Timestamp(end_timestamp))
+
+			if serviceName, ok := span.Data[cfg.Resources.ServiceName]; ok {
+				if serviceName.(string) != dataset {
+					foundServiceName = serviceName.(string)
+					newSpan.Attributes().PutStr("libhoney.receiver.dataset", dataset)
+					newSpan.Attributes().PutStr("libhoney.receiver.service_name", serviceName.(string))
+				}
+			}
+			if libraryName, ok := span.Data[cfg.Scopes.LibraryName]; ok {
+				if libraryName != foundLibraryName {
+					newSpan.Attributes().PutStr("libhoney.receiver.library_name", libraryName.(string))
+				}
+				foundLibraryName = libraryName.(string)
+			}
+			if libraryVersion, ok := span.Data[cfg.Scopes.LibraryVersion]; ok {
+				if libraryVersion != foundLibraryName {
+					newSpan.Attributes().PutStr("libhoney.receiver.library_vesion", libraryVersion.(string))
+				}
+				foundLibraryVersion = libraryVersion.(string)
+			}
+
+			if spanName, ok := span.Data[cfg.Attributes.Name]; ok {
+				newSpan.SetName(spanName.(string))
+			}
+			newSpan.Status().SetCode(ptrace.StatusCodeOk)
+
+			if _, ok := span.Data[cfg.Attributes.Error]; ok {
+				newSpan.Status().SetCode(ptrace.StatusCodeError)
+			}
+
+			if spanKind, ok := span.Data[cfg.Attributes.SpanKind]; ok {
+				switch spanKind.(string) {
+				case "server":
+					newSpan.SetKind(ptrace.SpanKindServer)
+				case "client":
+					newSpan.SetKind(ptrace.SpanKindClient)
+				case "producer":
+					newSpan.SetKind(ptrace.SpanKindProducer)
+				case "consumer":
+					newSpan.SetKind(ptrace.SpanKindConsumer)
+				case "internal":
+					newSpan.SetKind(ptrace.SpanKindInternal)
+				default:
+					newSpan.SetKind(ptrace.SpanKindUnspecified)
+				}
+			}
+
+			newSpan.Attributes().PutInt("SampleRate", int64(span.Samplerate))
+
+			for k, v := range span.Data {
+				if slices.Contains(already_used_fields, k) {
+					continue
+				}
+				switch v := v.(type) {
+				case string:
+					newSpan.Attributes().PutStr(k, v)
+				case int:
+					newSpan.Attributes().PutInt(k, int64(v))
+				case int64, int16, int32:
+					intv := v.(int64)
+					newSpan.Attributes().PutInt(k, intv)
+				case float64:
+					newSpan.Attributes().PutDouble(k, v)
+				case bool:
+					newSpan.Attributes().PutBool(k, v)
+				default:
+					fmt.Fprintf(os.Stderr, "Span data type issue: %v is the key for type %t where value is %v", k, v, v)
+				}
+			}
 		} else {
-			newSpan.SetTraceID(pcommon.TraceID(fakeMeAnId(32)))
-		}
+			// assume it's a log
+			newLog := logSlice.AppendEmpty()
+			time_ns := eventtime.GetEventTimeNano(span.Time)
 
-		if sid, ok := span.Data[cfg.Attributes.SpanId]; ok {
-			sid := strings.Replace(sid.(string), "-", "", -1)
-			if len(sid) == 32 {
-				sid = sid[8:24]
-			} else if len(sid) > 16 {
-				sid = sid[0:16]
+			newLog.SetTimestamp(pcommon.Timestamp(time_ns))
+
+			// set trace ID if it exists (Husky calls it "trace.trace_id")
+			if tid, ok := span.Data[cfg.Attributes.TraceId]; ok {
+				tid := strings.Replace(tid.(string), "-", "", -1)
+				if len(tid) > 32 {
+					tid = tid[0:32]
+				}
+				newTraceId := pcommon.TraceID(TraceIDFrom(tid))
+				newLog.SetTraceID(newTraceId)
 			}
-			newSpanId := pcommon.SpanID(SpanIDFrom(sid))
-			newSpan.SetSpanID(newSpanId)
-		} else {
-			newSpan.SetSpanID(pcommon.SpanID(fakeMeAnId(16)))
-		}
-
-		newSpan.SetStartTimestamp(pcommon.Timestamp(time_ns))
-		newSpan.SetEndTimestamp(pcommon.Timestamp(end_timestamp))
-
-		if serviceName, ok := span.Data[cfg.Resources.ServiceName]; ok {
-			if serviceName.(string) != dataset {
-				foundServiceName = serviceName.(string)
-				newSpan.Attributes().PutStr("libhoney.receiver.dataset", dataset)
-				newSpan.Attributes().PutStr("libhoney.receiver.service_name", serviceName.(string))
+			// set a span ID if it exists (Husky calls it "trace.parent_id")
+			if sid, ok := span.Data[cfg.Attributes.ParentId]; ok {
+				sid := strings.Replace(sid.(string), "-", "", -1)
+				if len(sid) == 32 {
+					sid = sid[8:24]
+				} else if len(sid) > 16 {
+					sid = sid[0:16]
+				}
+				newSpanId := pcommon.SpanID(SpanIDFrom(sid))
+				newLog.SetSpanID(newSpanId)
 			}
-		}
-		if libraryName, ok := span.Data[cfg.Scopes.LibraryName]; ok {
-			if libraryName != foundLibraryName {
-				newSpan.Attributes().PutStr("libhoney.receiver.library_name", libraryName.(string))
+
+			if logSevCode, ok := span.Data["severity_code"]; ok {
+				logSevInt := int32(logSevCode.(int))
+				newLog.SetSeverityNumber(plog.SeverityNumber(logSevInt))
 			}
-			foundLibraryName = libraryName.(string)
-		}
-		if libraryVersion, ok := span.Data[cfg.Scopes.LibraryVersion]; ok {
-			if libraryVersion != foundLibraryName {
-				newSpan.Attributes().PutStr("libhoney.receiver.library_vesion", libraryVersion.(string))
+
+			if logSevText, ok := span.Data["severity_text"]; ok {
+				newLog.SetSeverityText(logSevText.(string))
 			}
-			foundLibraryVersion = libraryVersion.(string)
-		}
 
-		if spanName, ok := span.Data[cfg.Attributes.Name]; ok {
-			newSpan.SetName(spanName.(string))
-		}
-		newSpan.Status().SetCode(ptrace.StatusCodeOk)
-
-		if _, ok := span.Data[cfg.Attributes.Error]; ok {
-			newSpan.Status().SetCode(ptrace.StatusCodeError)
-		}
-
-		if spanKind, ok := span.Data[cfg.Attributes.SpanKind]; ok {
-			switch spanKind.(string) {
-			case "server":
-				newSpan.SetKind(ptrace.SpanKindServer)
-			case "client":
-				newSpan.SetKind(ptrace.SpanKindClient)
-			case "producer":
-				newSpan.SetKind(ptrace.SpanKindProducer)
-			case "consumer":
-				newSpan.SetKind(ptrace.SpanKindConsumer)
-			case "internal":
-				newSpan.SetKind(ptrace.SpanKindInternal)
-			default:
-				newSpan.SetKind(ptrace.SpanKindUnspecified)
+			if logFlags, ok := span.Data["flags"]; ok {
+				logFlagsUint := uint32(logFlags.(int))
+				newLog.SetFlags(plog.LogRecordFlags(logFlagsUint))
 			}
-		}
 
-		newSpan.Attributes().PutInt("SampleRate", int64(span.Samplerate))
-
-		for k, v := range span.Data {
-			if slices.Contains(already_used_fields, k) {
-				continue
+			// undoing this is gonna be comlicated: https://github.com/honeycombio/husky/blob/91c0498333cd9f5eed1fdb8544ca486db7dea565/otlp/logs.go#L61
+			if logBody, ok := span.Data["body"]; ok {
+				newLog.Body().SetStr(logBody.(string))
 			}
-			switch v := v.(type) {
-			case string:
-				newSpan.Attributes().PutStr(k, v)
-			case int:
-				newSpan.Attributes().PutInt(k, int64(v))
-			case int64, int16, int32:
-				intv := v.(int64)
-				newSpan.Attributes().PutInt(k, intv)
-			case float64:
-				newSpan.Attributes().PutDouble(k, v)
-			case bool:
-				newSpan.Attributes().PutBool(k, v)
-			default:
-				fmt.Fprintf(os.Stderr, "data type issue: %v is the key for type %t where value is %v", k, v, v)
+
+			newLog.Attributes().PutInt("SampleRate", int64(span.Samplerate))
+
+			logFieldsAlready := []string{"severity_text", "severity_code", "flags", "body"}
+			for k, v := range span.Data {
+				if slices.Contains(already_used_fields, k) {
+					continue
+				}
+				if slices.Contains(logFieldsAlready, k) {
+					continue
+				}
+				switch v := v.(type) {
+				case string:
+					newLog.Attributes().PutStr(k, v)
+				case int:
+					newLog.Attributes().PutInt(k, int64(v))
+				case int64, int16, int32:
+					intv := v.(int64)
+					newLog.Attributes().PutInt(k, intv)
+				case float64:
+					newLog.Attributes().PutDouble(k, v)
+				case bool:
+					newLog.Attributes().PutBool(k, v)
+				default:
+					fmt.Fprintf(os.Stderr, "Log data type issue: %v is the key for type %t where value is %v", k, v, v)
+				}
 			}
 		}
 	}
