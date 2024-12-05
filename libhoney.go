@@ -90,7 +90,7 @@ func (r *libhoneyReceiver) startHTTPServer(ctx context.Context, host component.H
 		r.settings.Logger.Info("r.nextTraces is not null so httpTracesReciever was added", zap.Int("paths", len(r.cfg.HTTP.TracesURLPaths)))
 		for _, path := range r.cfg.HTTP.TracesURLPaths {
 			httpMux.HandleFunc(path, func(resp http.ResponseWriter, req *http.Request) {
-				handleSomething(resp, req, httpTracesReceiver, httpLogsReceiver, *r.cfg)
+				handleSomething(resp, req, httpTracesReceiver, httpLogsReceiver, *r.cfg, *r.settings.Logger)
 			})
 			r.settings.Logger.Debug("Added path to HTTP server", zap.String("path", path))
 		}
@@ -180,6 +180,6 @@ func (r *libhoneyReceiver) registerTraceConsumer(tc consumer.Traces) {
 	r.nextTraces = tc
 }
 
-func (r *libhoneyReceiver) registerLosConsumer(tc consumer.Logs) {
+func (r *libhoneyReceiver) registerLogConsumer(tc consumer.Logs) {
 	r.nextLogs = tc
 }

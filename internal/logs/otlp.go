@@ -8,7 +8,7 @@ import (
 
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/pdata/plog/plogotlp"
-	"go.opentelemetry.io/collector/receiver/otlpreceiver/internal/errors"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/errors"
 	"go.opentelemetry.io/collector/receiver/receiverhelper"
 )
 

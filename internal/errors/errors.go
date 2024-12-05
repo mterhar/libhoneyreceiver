@@ -4,6 +4,7 @@
 package errors // import "go.opentelemetry.io/collector/receiver/otlpreceiver/internal/errors"
 
 import (
+	"errors"
 	"net/http"
 
 	"google.golang.org/grpc/codes"
@@ -43,4 +44,8 @@ func GetHTTPStatusCodeFromStatus(s *status.Status) int {
 	default:
 		return http.StatusInternalServerError
 	}
+}
+
+func New(s string) error {
+	return errors.New(s)
 }

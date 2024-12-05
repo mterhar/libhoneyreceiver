@@ -55,7 +55,7 @@ func createDefaultConfig() component.Config {
 			SpanId:         "trace.span_id",
 			ParentId:       "trace.parent_id",
 			Name:           "name",
-			Error:			"error",
+			Error:          "error",
 			SpanKind:       "span.kind",
 			DurationFields: durationFieldsArr,
 		},
@@ -63,9 +63,9 @@ func createDefaultConfig() component.Config {
 }
 
 func createLogs(
-	_ context.Context, 
-	set receiver.Settings, 
-	cfg component.Config, 
+	_ context.Context,
+	set receiver.Settings,
+	cfg component.Config,
 	nextConsumer consumer.Logs,
 ) (receiver.Logs, error) {
 	oCfg := cfg.(*Config)
@@ -79,8 +79,8 @@ func createLogs(
 		return nil, err
 	}
 
-	r.Unwrap().registerLogsConsumer(nextConsumer)
-	return r, nil	
+	r.Unwrap().registerLogConsumer(nextConsumer)
+	return r, nil
 }
 
 // createTraces creates a trace receiver based on provided config.

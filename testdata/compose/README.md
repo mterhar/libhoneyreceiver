@@ -152,6 +152,3 @@ loadgen --host=http://localhost:4317 --apikey=hcaik_... --dataset=loadgen --trac
 
 Currently some troubleshooting attributes are added to span that it's parsing.
 
-1. `libhoney.receiver.service_name` shows what came in that matched the service_name configuration.
-1. `libhoney.receiver.dataset` shows what came in as the dataset component in the path
-1. `libhoney.receiver.library_name` and `libhoney.receiver.library_vesion` which I probably have to create instrumentationScopes for but haven't tested with robust enough information yet
