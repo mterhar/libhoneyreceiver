@@ -1,12 +1,24 @@
 services:
+  firstcol:
+    image: otel/opentelemetry-collector-k8s:0.111.0
+    environment:
+      - HOSTNAME=firstcol
+    ports:
+      - 14317:4317
+      - 14318:4318
+    volumes:
+      - ./firstcol.yaml:/firstcol.yaml
+    entrypoint:
+      - "/otelcol-k8s"
+    command:
+      - "--config=/firstcol.yaml"
   refinery1:
-    image: honeycombio/refinery:2.6.1
+    image: honeycombio/refinery:2.8.4
     environment:
       - OTEL_RESOURCE_ATTRIBUTES=cluster.name=docker-compose
       - REFINERY_QUERY_AUTH_TOKEN=IfYouWantToTestYourRulesSetThis
       - REFINERY_HONEYCOMB_API_KEY=someApiKey_for_refinery_logs_and_metrics
     ports:
-      - 4317:4317
       - 8889:8080
     entrypoint:
       - "refinery"
@@ -19,6 +31,6 @@ services:
       - ./config.yaml:/etc/refinery/config.yaml
       - ./rules.yaml:/etc/refinery/rules.yaml
   redis:
-    image: redis:6.2.5
+    image: redis:7.2
     expose:
       - "6379"

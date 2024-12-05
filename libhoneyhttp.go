@@ -1,7 +1,6 @@
 package libhoneyreceiver
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
@@ -12,12 +11,15 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
-	"os"
 	"slices"
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/plog/plogotlp"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	semconv "go.opentelemetry.io/collector/semconv/v1.16.0"
 	trc "go.opentelemetry.io/otel/trace"
@@ -29,6 +31,7 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/errors"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/eventtime"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/httphelper"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/logs"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/libhoneyreceiver/internal/trace"
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -38,23 +41,21 @@ var fallbackMsg = []byte(`{"code": 13, "message": "failed to marshal error messa
 
 const fallbackContentType = "application/json"
 
-func handleTraces(resp http.ResponseWriter, req *http.Request, tracesReceiver *trace.Receiver, cfg Config) {
+func handleSomething(resp http.ResponseWriter, req *http.Request, tracesReceiver *trace.Receiver, logsReceiver *logs.Receiver, cfg Config, logger zap.Logger) {
 	// fmt.Println("Got a thing!")
 	enc, ok := readContentType(resp, req)
 	if !ok {
 		return
 	}
 
-	// simpleSpans, err := readInputPorgressively(resp, req, enc) // enc.unmarshalTracesRequest(body)
-	// if err != nil {
-	// 	writeError(resp, enc, err, http.StatusBadRequest)
-	// 	return
-	// }
+	dataset, err := getDatasetFromRequest(req.RequestURI)
+	if err != nil {
+		logger.Info("No dataset found in URL", zap.String("req.RequstURI", req.RequestURI))
+	}
 
-	dataset, _ := getDatasetFromRequest(req.URL.RawPath)
-	// if there's an error, maybe we should check inside the spans for a service.name?
 	for _, p := range cfg.HTTP.TracesURLPaths {
 		dataset = strings.Replace(dataset, p, "", 1)
+		logger.Debug("dataset parsed", zap.String("dataset.parsed", dataset))
 	}
 
 	body, err := io.ReadAll(req.Body)
@@ -71,22 +72,29 @@ func handleTraces(resp http.ResponseWriter, req *http.Request, tracesReceiver *t
 		decoder := msgpack.NewDecoder(bytes.NewReader(body))
 		decoder.UseLooseInterfaceDecoding(true)
 		decoder.Decode(&simpleSpans)
+		if len(simpleSpans) > 0 {
+			logger.Debug("Decoding with msgpack worked", zap.Time("timestamp.first.msgpacktimestamp", *simpleSpans[0].MsgPackTimestamp), zap.String("timestamp.first.time", simpleSpans[0].Time))
+			logger.Debug("span zero", zap.String("span.data", simpleSpans[0].DebugString()))
+		}
 	case jsonContentType:
 		err = json.Unmarshal(body, &simpleSpans)
 		if err != nil {
 			writeError(resp, enc, err, http.StatusBadRequest)
 		}
+		if len(simpleSpans) > 0 {
+			logger.Debug("Decoding with json worked", zap.Time("timestamp.first.msgpacktimestamp", *simpleSpans[0].MsgPackTimestamp), zap.String("timestamp.first.time", simpleSpans[0].Time))
+		}
 	}
 
-	otlpTraces, err := toTraces(dataset, simpleSpans, cfg)
+	otlpTraces, otlpLogs, err := toPsomething(dataset, simpleSpans, cfg, logger)
 	if err != nil {
 		writeError(resp, enc, err, http.StatusBadRequest)
 		return
 	}
 
-	otlpReq := ptraceotlp.NewExportRequestFromTraces(otlpTraces)
+	otlpReqTrace := ptraceotlp.NewExportRequestFromTraces(otlpTraces)
 
-	otlpResp, err := tracesReceiver.Export(req.Context(), otlpReq)
+	otlpResp, err := tracesReceiver.Export(req.Context(), otlpReqTrace)
 	if err != nil {
 		writeError(resp, enc, err, http.StatusInternalServerError)
 		return
@@ -97,38 +105,22 @@ func handleTraces(resp http.ResponseWriter, req *http.Request, tracesReceiver *t
 		writeError(resp, enc, err, http.StatusInternalServerError)
 		return
 	}
-	writeResponse(resp, enc.contentType(), http.StatusOK, msg)
-}
 
-func readInputProgressively(resp http.ResponseWriter, req *http.Request, enc encoder) ([]simpleSpan, error) {
-	simpleSpans := make([]simpleSpan, 0)
-	lineNum := 0
-	defer func() {
-		panic := recover()
-		err, ok := panic.(error)
-		// recover from panic if one occurred. Set err to nil otherwise.
-		if !ok && err != nil {
-			writeError(resp, enc, err, http.StatusBadRequest)
-			return
-		}
-	}()
+	otlpReqLog := plogotlp.NewExportRequestFromLogs(otlpLogs)
 
-	scanner := bufio.NewScanner(req.Body)
-
-	for scanner.Scan() {
-		lineNum += 1
-		ss := simpleSpan{Time: eventtime.GetEventTimeDefaultString(), Samplerate: 1} // defaults
-
-		thisLine := scanner.Bytes()
-		err := json.Unmarshal(thisLine, &ss)
-		if err != nil {
-			writeError(resp, enc, err, http.StatusBadRequest)
-			fmt.Fprintf(os.Stderr, "encountered json error on line %d:\nError: %v\nJSON line: %v\n", lineNum, err.Error(), string(thisLine))
-			continue
-		}
-		simpleSpans = append(simpleSpans, ss)
+	otlpLogResp, err := logsReceiver.Export(req.Context(), otlpReqLog)
+	if err != nil {
+		writeError(resp, enc, err, http.StatusInternalServerError)
+		return
 	}
-	return simpleSpans, nil
+
+	_, err = enc.marshalLogsResponse(otlpLogResp)
+	if err != nil {
+		writeError(resp, enc, err, http.StatusInternalServerError)
+		return
+	}
+
+	writeResponse(resp, enc.contentType(), http.StatusOK, msg)
 }
 
 // writeError encodes the HTTP error inside a rpc.Status message as required by the OTLP protocol.
@@ -247,36 +239,293 @@ func getDatasetFromRequest(path string) (string, error) {
 
 type simpleSpan struct {
 	Samplerate       int                    `json:"samplerate" msgpack:"samplerate"`
-	MsgPackTimestamp *time.Time             `msgpack:"time,omitempty"`
-	Time             string                 `json:"time"` // epoch miliseconds.nanoseconds
+	MsgPackTimestamp *time.Time             `msgpack:"time"`
+	Time             string                 `json:"time"` // should not be trusted. use MsgPackTimestamp
 	Data             map[string]interface{} `json:"data" msgpack:"data"`
 }
 
-// this should override unmarshall of spans to provide defaults
+// Overrides unmarshall to make sure the MsgPackTimestamp is set
 func (s *simpleSpan) UnmarshalJSON(j []byte) error {
 	type _simpleSpan simpleSpan
-	tmp := _simpleSpan{Time: eventtime.GetEventTimeDefaultString(), Samplerate: 1}
+	tstr := eventtime.GetEventTimeDefaultString()
+	tzero := time.Time{}
+	tmp := _simpleSpan{Time: "none", MsgPackTimestamp: &tzero, Samplerate: 1}
 
 	err := json.Unmarshal(j, &tmp)
 	if err != nil {
 		return err
+	}
+	if tmp.MsgPackTimestamp.IsZero() && tmp.Time == "none" {
+		// neither timestamp was set. give it right now.
+		tmp.Time = tstr
+		tnow := time.Now()
+		tmp.MsgPackTimestamp = &tnow
+	}
+	if tmp.MsgPackTimestamp.IsZero() {
+		propertime := eventtime.GetEventTime(tmp.Time)
+		tmp.MsgPackTimestamp = &propertime
 	}
 
 	*s = simpleSpan(tmp)
 	return nil
 }
 
-func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error) {
-	// Creating a map of service spans to slices
-	// since the expectation is that `service.name`
-	// is added as a resource attribute in most systems
-	// now instead of being a span level attribute.
-	slice := ptrace.NewSpanSlice()
-	count := 0
-	// foundServiceNames := []string{dataset}
-	foundLibraryName := "libhoney_receiver"
-	foundLibraryVersion := "1.0.0"
-	foundServiceName := dataset
+func (s *simpleSpan) DebugString() string {
+	return fmt.Sprintf("%#v", s)
+}
+
+// returns trace or log depending on the span information provdied
+func (s *simpleSpan) SignalType() (string, error) {
+	if sig, ok := s.Data["meta.signal_type"]; ok {
+		switch sig {
+		case "trace":
+			if atype, ok := s.Data["meta.annotation_type"]; ok {
+				if atype == "span_event" {
+					return "span_event", nil
+				} else if atype == "link" {
+					return "span_link", nil
+				}
+				return "span", errors.New("invalid annotation type, but probably a span")
+			}
+			return "span", nil
+		case "log":
+			return "log", nil
+		default:
+			return "log", errors.New("Invalid meta.signal_type")
+		}
+	}
+	return "log", errors.New("missing meta.signal_type and meta.annotation_type")
+}
+
+func (s *simpleSpan) GetService(cfg Config, seen *serviceHistory, dataset string) (string, error) {
+	if serviceName, ok := s.Data[cfg.Resources.ServiceName]; ok {
+		seen.NameCount[serviceName.(string)] += 1
+		return serviceName.(string), nil
+	}
+	return dataset, errors.New("no service.name found in event")
+}
+
+func (s *simpleSpan) GetScope(cfg Config, seen *scopeHistory, serviceName string) (string, error) {
+	if scopeLibraryName, ok := s.Data[cfg.Scopes.LibraryName]; ok {
+		scopeKey := serviceName + scopeLibraryName.(string)
+		if _, ok := seen.Scope[scopeKey]; ok {
+			// if we've seen it, we don't expect it to be different right away so we'll just return it.
+			return scopeKey, nil
+		}
+		// otherwise, we need to make a new found scope
+		scopeLibraryVersion := "unset"
+		if scopeLibVer, ok := s.Data[cfg.Scopes.LibraryVersion]; ok {
+			scopeLibraryVersion = scopeLibVer.(string)
+		}
+		newScope := simpleScope{
+			ServiceName:    serviceName, // we only set the service name once. If the same library comes from multiple services in the same batch, we're in trouble.
+			LibraryName:    scopeLibraryName.(string),
+			LibraryVersion: scopeLibraryVersion,
+			ScopeSpans:     ptrace.NewSpanSlice(),
+			ScopeLogs:      plog.NewLogRecordSlice(),
+		}
+		seen.Scope[scopeKey] = newScope
+		return scopeKey, nil
+	}
+	return "libhoney.receiver", errors.New("No library name found")
+}
+
+type simpleScope struct {
+	ServiceName    string
+	LibraryName    string
+	LibraryVersion string
+	ScopeSpans     ptrace.SpanSlice
+	ScopeLogs      plog.LogRecordSlice
+}
+
+type scopeHistory struct {
+	Scope map[string]simpleScope // key here is service.name+library.name
+}
+type serviceHistory struct {
+	NameCount map[string]int
+}
+
+// returns a ptrace.Span that is equivalent to the simpleSpan that came in already.
+func (s *simpleSpan) ToPTraceSpan(newSpan *ptrace.Span, already_used_fields *[]string, cfg Config, logger zap.Logger) error {
+	time_ns := s.MsgPackTimestamp.UnixNano()
+	logger.Debug("processing trace with", zap.Int64("timestamp", time_ns))
+
+	var parent_id trc.SpanID
+	if pid, ok := s.Data[cfg.Attributes.ParentId]; ok {
+		parent_id = SpanIDFrom(pid.(string))
+		newSpan.SetParentSpanID(pcommon.SpanID(parent_id))
+	}
+
+	duration_ms := 0.0
+	for _, df := range cfg.Attributes.DurationFields {
+		if duration, okay := s.Data[df]; okay {
+			duration_ms = duration.(float64)
+			break
+		}
+	}
+	end_timestamp := time_ns + (int64(duration_ms) * 1000000)
+
+	if tid, ok := s.Data[cfg.Attributes.TraceId]; ok {
+		tid := strings.Replace(tid.(string), "-", "", -1)
+		if len(tid) > 32 {
+			tid = tid[0:32]
+		}
+		newTraceId := pcommon.TraceID(TraceIDFrom(tid))
+		newSpan.SetTraceID(newTraceId)
+	} else {
+		newSpan.SetTraceID(pcommon.TraceID(fakeMeAnId(32)))
+	}
+
+	if sid, ok := s.Data[cfg.Attributes.SpanId]; ok {
+		sid := strings.Replace(sid.(string), "-", "", -1)
+		if len(sid) == 32 {
+			sid = sid[8:24]
+		} else if len(sid) > 16 {
+			sid = sid[0:16]
+		}
+		newSpanId := pcommon.SpanID(SpanIDFrom(sid))
+		newSpan.SetSpanID(newSpanId)
+	} else {
+		newSpan.SetSpanID(pcommon.SpanID(fakeMeAnId(16)))
+	}
+
+	newSpan.SetStartTimestamp(pcommon.Timestamp(time_ns))
+	newSpan.SetEndTimestamp(pcommon.Timestamp(end_timestamp))
+
+	if spanName, ok := s.Data[cfg.Attributes.Name]; ok {
+		newSpan.SetName(spanName.(string))
+	}
+	newSpan.Status().SetCode(ptrace.StatusCodeOk)
+
+	if _, ok := s.Data[cfg.Attributes.Error]; ok {
+		newSpan.Status().SetCode(ptrace.StatusCodeError)
+	}
+
+	if spanKind, ok := s.Data[cfg.Attributes.SpanKind]; ok {
+		switch spanKind.(string) {
+		case "server":
+			newSpan.SetKind(ptrace.SpanKindServer)
+		case "client":
+			newSpan.SetKind(ptrace.SpanKindClient)
+		case "producer":
+			newSpan.SetKind(ptrace.SpanKindProducer)
+		case "consumer":
+			newSpan.SetKind(ptrace.SpanKindConsumer)
+		case "internal":
+			newSpan.SetKind(ptrace.SpanKindInternal)
+		default:
+			newSpan.SetKind(ptrace.SpanKindUnspecified)
+		}
+	}
+
+	newSpan.Attributes().PutInt("SampleRate", int64(s.Samplerate))
+
+	for k, v := range s.Data {
+		if slices.Contains(*already_used_fields, k) {
+			continue
+		}
+		switch v := v.(type) {
+		case string:
+			newSpan.Attributes().PutStr(k, v)
+		case int:
+			newSpan.Attributes().PutInt(k, int64(v))
+		case int64, int16, int32:
+			intv := v.(int64)
+			newSpan.Attributes().PutInt(k, intv)
+		case float64:
+			newSpan.Attributes().PutDouble(k, v)
+		case bool:
+			newSpan.Attributes().PutBool(k, v)
+		default:
+			logger.Warn("Span data type issue", zap.String("trace.trace_id", newSpan.TraceID().String()), zap.String("trace.span_id", newSpan.SpanID().String()), zap.String("key", k))
+		}
+	}
+	return nil
+}
+
+func (s *simpleSpan) ToPLogRecord(newLog *plog.LogRecord, already_used_fields *[]string, cfg Config, logger zap.Logger) error {
+	time_ns := s.MsgPackTimestamp.UnixNano()
+	logger.Debug("processing log with", zap.Int64("timestamp", time_ns))
+
+	newLog.SetTimestamp(pcommon.Timestamp(time_ns))
+
+	// set trace ID if it exists (Husky calls it "trace.trace_id")
+	if tid, ok := s.Data[cfg.Attributes.TraceId]; ok {
+		tid := strings.Replace(tid.(string), "-", "", -1)
+		if len(tid) > 32 {
+			tid = tid[0:32]
+		}
+		newTraceId := pcommon.TraceID(TraceIDFrom(tid))
+		newLog.SetTraceID(newTraceId)
+	}
+	// set a span ID if it exists (Husky calls it "trace.parent_id")
+	if sid, ok := s.Data[cfg.Attributes.ParentId]; ok {
+		sid := strings.Replace(sid.(string), "-", "", -1)
+		if len(sid) == 32 {
+			sid = sid[8:24]
+		} else if len(sid) > 16 {
+			sid = sid[0:16]
+		}
+		newSpanId := pcommon.SpanID(SpanIDFrom(sid))
+		newLog.SetSpanID(newSpanId)
+	}
+
+	if logSevCode, ok := s.Data["severity_code"]; ok {
+		logSevInt := int32(logSevCode.(int64))
+		newLog.SetSeverityNumber(plog.SeverityNumber(logSevInt))
+	}
+
+	if logSevText, ok := s.Data["severity_text"]; ok {
+		newLog.SetSeverityText(logSevText.(string))
+	}
+
+	if logFlags, ok := s.Data["flags"]; ok {
+		logFlagsUint := uint32(logFlags.(uint64))
+		newLog.SetFlags(plog.LogRecordFlags(logFlagsUint))
+	}
+
+	// undoing this is gonna be complicated: https://github.com/honeycombio/husky/blob/91c0498333cd9f5eed1fdb8544ca486db7dea565/otlp/logs.go#L61
+	if logBody, ok := s.Data["body"]; ok {
+		newLog.Body().SetStr(logBody.(string))
+	}
+
+	newLog.Attributes().PutInt("SampleRate", int64(s.Samplerate))
+
+	logFieldsAlready := []string{"severity_text", "severity_code", "flags", "body"}
+	for k, v := range s.Data {
+		if slices.Contains(*already_used_fields, k) {
+			continue
+		}
+		if slices.Contains(logFieldsAlready, k) {
+			continue
+		}
+		switch v := v.(type) {
+		case string:
+			newLog.Attributes().PutStr(k, v)
+		case int:
+			newLog.Attributes().PutInt(k, int64(v))
+		case int64, int16, int32:
+			intv := v.(int64)
+			newLog.Attributes().PutInt(k, intv)
+		case float64:
+			newLog.Attributes().PutDouble(k, v)
+		case bool:
+			newLog.Attributes().PutBool(k, v)
+		default:
+			logger.Warn("Span data type issue", zap.Int64("timestamp", time_ns), zap.String("key", k))
+		}
+	}
+	return nil
+}
+
+func toPsomething(dataset string, ss []simpleSpan, cfg Config, logger zap.Logger) (ptrace.Traces, plog.Logs, error) {
+	foundServices := serviceHistory{}
+	foundServices.NameCount = make(map[string]int)
+	foundScopes := scopeHistory{}
+	foundScopes.Scope = make(map[string]simpleScope)
+
+	foundScopes.Scope = make(map[string]simpleScope)                                                                                             // a list of already seen scopes
+	foundScopes.Scope["libhoney.receiver"] = simpleScope{dataset, "libhoney.receiver", "1.0.0", ptrace.NewSpanSlice(), plog.NewLogRecordSlice()} // seed a default
 
 	spanLinks := map[trc.SpanID][]simpleSpan{}
 	spanEvents := map[trc.SpanID][]simpleSpan{}
@@ -289,216 +538,158 @@ func toTraces(dataset string, ss []simpleSpan, cfg Config) (ptrace.Traces, error
 	already_used_fields = append(already_used_fields, cfg.Attributes.DurationFields...)
 
 	for _, span := range ss {
-		count += 1
-		newSpan := slice.AppendEmpty()
-		time_ns := eventtime.GetEventTimeNano(span.Time)
+		// logger.Debug("Print span contents", zap.String("span.object", span.DebugString()))
 
 		var parent_id trc.SpanID
 		if pid, ok := span.Data[cfg.Attributes.ParentId]; ok {
 			parent_id = SpanIDFrom(pid.(string))
-			newSpan.SetParentSpanID(pcommon.SpanID(parent_id))
 		}
-		// find span events and span links
-		if mat, ok := span.Data["meta.annotation_type"]; ok {
-			switch mat {
-			case "span_link":
-				spanLinks[parent_id] = append(spanLinks[parent_id], span)
-				continue
-			case "span_event":
-				spanEvents[parent_id] = append(spanEvents[parent_id], span)
-				continue
+		// main switch to do the thing
+		action, err := span.SignalType()
+		if err != nil {
+			logger.Warn("signal type unclear")
+		}
+		switch action {
+		case "span":
+			spanService, _ := span.GetService(cfg, &foundServices, dataset)
+			spanScopeKey, _ := span.GetScope(cfg, &foundScopes, spanService) //adds a new found scope if needed
+			newSpan := foundScopes.Scope[spanScopeKey].ScopeSpans.AppendEmpty()
+			err := span.ToPTraceSpan(&newSpan, &already_used_fields, cfg, logger)
+			if err != nil {
+				logger.Warn("span could not be converted from libhoney to ptrace", zap.String("span.object", span.DebugString()))
 			}
-		}
-
-		duration_ms := 0.0
-		for _, df := range cfg.Attributes.DurationFields {
-			if duration, okay := span.Data[df]; okay {
-				duration_ms = duration.(float64)
-				break
+		case "log":
+			logService, _ := span.GetService(cfg, &foundServices, dataset)
+			logScopeKey, _ := span.GetScope(cfg, &foundScopes, logService) //adds a new found scope if needed
+			newLog := foundScopes.Scope[logScopeKey].ScopeLogs.AppendEmpty()
+			span.ToPLogRecord(&newLog, &already_used_fields, cfg, logger)
+			if err != nil {
+				logger.Warn("log could not be converted from libhoney to plog", zap.String("span.object", span.DebugString()))
 			}
-		}
-		end_timestamp := time_ns + (int64(duration_ms) * 1000000)
-
-		if tid, ok := span.Data[cfg.Attributes.TraceId]; ok {
-			tid := strings.Replace(tid.(string), "-", "", -1)
-			if len(tid) > 32 {
-				tid = tid[0:32]
-			}
-			newTraceId := pcommon.TraceID(TraceIDFrom(tid))
-			newSpan.SetTraceID(newTraceId)
-		} else {
-			newSpan.SetTraceID(pcommon.TraceID(fakeMeAnId(32)))
-		}
-
-		if sid, ok := span.Data[cfg.Attributes.SpanId]; ok {
-			sid := strings.Replace(sid.(string), "-", "", -1)
-			if len(sid) == 32 {
-				sid = sid[8:24]
-			} else if len(sid) > 16 {
-				sid = sid[0:16]
-			}
-			newSpanId := pcommon.SpanID(SpanIDFrom(sid))
-			newSpan.SetSpanID(newSpanId)
-		} else {
-			newSpan.SetSpanID(pcommon.SpanID(fakeMeAnId(16)))
-		}
-
-		newSpan.SetStartTimestamp(pcommon.Timestamp(time_ns))
-		newSpan.SetEndTimestamp(pcommon.Timestamp(end_timestamp))
-
-		if serviceName, ok := span.Data[cfg.Resources.ServiceName]; ok {
-			if serviceName.(string) != dataset {
-				foundServiceName = serviceName.(string)
-				newSpan.Attributes().PutStr("libhoney.receiver.dataset", dataset)
-				newSpan.Attributes().PutStr("libhoney.receiver.service_name", serviceName.(string))
-			}
-		}
-		if libraryName, ok := span.Data[cfg.Scopes.LibraryName]; ok {
-			if libraryName != foundLibraryName {
-				newSpan.Attributes().PutStr("libhoney.receiver.library_name", libraryName.(string))
-			}
-			foundLibraryName = libraryName.(string)
-		}
-		if libraryVersion, ok := span.Data[cfg.Scopes.LibraryVersion]; ok {
-			if libraryVersion != foundLibraryName {
-				newSpan.Attributes().PutStr("libhoney.receiver.library_vesion", libraryVersion.(string))
-			}
-			foundLibraryVersion = libraryVersion.(string)
-		}
-
-		if spanName, ok := span.Data[cfg.Attributes.Name]; ok {
-			newSpan.SetName(spanName.(string))
-		}
-		newSpan.Status().SetCode(ptrace.StatusCodeOk)
-
-		if _, ok := span.Data[cfg.Attributes.Error]; ok {
-			newSpan.Status().SetCode(ptrace.StatusCodeError)
-		}
-
-		if spanKind, ok := span.Data[cfg.Attributes.SpanKind]; ok {
-			switch spanKind.(string) {
-			case "server":
-				newSpan.SetKind(ptrace.SpanKindServer)
-			case "client":
-				newSpan.SetKind(ptrace.SpanKindClient)
-			case "producer":
-				newSpan.SetKind(ptrace.SpanKindProducer)
-			case "consumer":
-				newSpan.SetKind(ptrace.SpanKindConsumer)
-			case "internal":
-				newSpan.SetKind(ptrace.SpanKindInternal)
-			default:
-				newSpan.SetKind(ptrace.SpanKindUnspecified)
-			}
-		}
-
-		newSpan.Attributes().PutInt("SampleRate", int64(span.Samplerate))
-
-		for k, v := range span.Data {
-			if slices.Contains(already_used_fields, k) {
-				continue
-			}
-			switch v := v.(type) {
-			case string:
-				newSpan.Attributes().PutStr(k, v)
-			case int:
-				newSpan.Attributes().PutInt(k, int64(v))
-			case int64, int16, int32:
-				intv := v.(int64)
-				newSpan.Attributes().PutInt(k, intv)
-			case float64:
-				newSpan.Attributes().PutDouble(k, v)
-			case bool:
-				newSpan.Attributes().PutBool(k, v)
-			default:
-				fmt.Fprintf(os.Stderr, "data type issue: %v is the key for type %t where value is %v", k, v, v)
-			}
+		case "span_event":
+			spanEvents[parent_id] = append(spanEvents[parent_id], span)
+		case "span_link":
+			spanLinks[parent_id] = append(spanLinks[parent_id], span)
 		}
 	}
 
 	// add span links and events back
 	// i'd like to only loop through the span events and links arrays but don't see a way to address the slices
-	for i := 0; i < slice.Len(); i++ {
-		sp := slice.At(i)
-		spId := trc.SpanID(sp.SpanID())
-		if speArr, ok := spanEvents[spId]; ok {
-			for _, spe := range speArr {
-				newEvent := sp.Events().AppendEmpty()
-				newEvent.SetTimestamp(pcommon.Timestamp(eventtime.GetEventTimeNano(spe.Time)))
-				newEvent.SetName(spe.Data["name"].(string))
-				for lkey, lval := range spe.Data {
-					if slices.Contains(already_used_fields, lkey) {
-						continue
-					}
-					if lkey == "meta.annotation_type" || lkey == "meta.signal_type" {
-						continue
-					}
-					switch lval := lval.(type) {
-					case string:
-						newEvent.Attributes().PutStr(lkey, lval)
-					case int:
-						newEvent.Attributes().PutInt(lkey, int64(lval))
-					case int64, int16, int32:
-						intv := lval.(int64)
-						newEvent.Attributes().PutInt(lkey, intv)
-					case float64:
-						newEvent.Attributes().PutDouble(lkey, lval)
-					case bool:
-						newEvent.Attributes().PutBool(lkey, lval)
-					default:
-						fmt.Fprintf(os.Stderr, "data type issue in span event: %v is the key for type %t where value is %v", lkey, lval, lval)
+	start := time.Now()
+	for _, ss := range foundScopes.Scope {
+		for i := 0; i < ss.ScopeSpans.Len(); i++ {
+			sp := ss.ScopeSpans.At(i)
+
+			spId := trc.SpanID(sp.SpanID())
+			if speArr, ok := spanEvents[spId]; ok {
+				for _, spe := range speArr {
+					newEvent := sp.Events().AppendEmpty()
+					newEvent.SetTimestamp(pcommon.Timestamp(spe.MsgPackTimestamp.UnixNano()))
+					newEvent.SetName(spe.Data["name"].(string))
+					for lkey, lval := range spe.Data {
+						if slices.Contains(already_used_fields, lkey) {
+							continue
+						}
+						if lkey == "meta.annotation_type" || lkey == "meta.signal_type" {
+							continue
+						}
+						switch lval := lval.(type) {
+						case string:
+							newEvent.Attributes().PutStr(lkey, lval)
+						case int:
+							newEvent.Attributes().PutInt(lkey, int64(lval))
+						case int64, int16, int32:
+							intv := lval.(int64)
+							newEvent.Attributes().PutInt(lkey, intv)
+						case float64:
+							newEvent.Attributes().PutDouble(lkey, lval)
+						case bool:
+							newEvent.Attributes().PutBool(lkey, lval)
+						default:
+							logger.Error("SpanEvent data type issue", zap.String("trace.trace_id", sp.TraceID().String()), zap.String("trace.span_id", sp.SpanID().String()), zap.String("key", lkey))
+						}
 					}
 				}
 			}
-		}
-		if splArr, ok := spanLinks[spId]; ok {
-			for _, spl := range splArr {
-				newLink := sp.Links().AppendEmpty()
-				linkedTraceID := pcommon.TraceID(TraceIDFrom(spl.Data["trace.link.trace_id"].(string)))
-				newLink.SetTraceID(linkedTraceID)
-				linkedSpanID := pcommon.SpanID(SpanIDFrom(spl.Data["trace.link.span_id"].(string)))
-				newLink.SetSpanID(linkedSpanID)
-				for lkey, lval := range spl.Data {
+			if splArr, ok := spanLinks[spId]; ok {
+				for _, spl := range splArr {
+					newLink := sp.Links().AppendEmpty()
 
-					if len(lkey) > 10 && lkey[:11] == "trace.link." {
+					var linkTraceId trc.TraceID
+					if linkTraceStr, ok := spl.Data["trace.link.trace_id"]; ok {
+						linkTraceId = TraceIDFrom(linkTraceStr.(string))
+						newLink.SetTraceID(pcommon.TraceID(linkTraceId))
+					} else {
+						logger.Warn("span link missing attributes", zap.String("missing.attribute", "trace.link.trace_id"), zap.String("span link contents", spl.DebugString()))
 						continue
 					}
-					if slices.Contains(already_used_fields, lkey) {
+					var linkSpanId trc.SpanID
+					if linkSpanStr, ok := spl.Data["trace.link.span_id"]; ok {
+						linkSpanId = SpanIDFrom(linkSpanStr.(string))
+						newLink.SetSpanID(pcommon.SpanID(linkSpanId))
+					} else {
+						logger.Warn("span link missing attributes", zap.String("missing.attribute", "trace.link.span_id"), zap.String("span link contents", spl.DebugString()))
 						continue
 					}
-					if lkey == "meta.annotation_type" || lkey == "meta.signal_type" {
-						continue
-					}
-					switch lval := lval.(type) {
-					case string:
-						newLink.Attributes().PutStr(lkey, lval)
-					case int:
-						newLink.Attributes().PutInt(lkey, int64(lval))
-					case int64, int16, int32:
-						intv := lval.(int64)
-						newLink.Attributes().PutInt(lkey, intv)
-					case float64:
-						newLink.Attributes().PutDouble(lkey, lval)
-					case bool:
-						newLink.Attributes().PutBool(lkey, lval)
-					default:
-						fmt.Fprintf(os.Stderr, "data type issue in span link: %v is the key for type %t where value is %v", lkey, lval, lval)
+					for lkey, lval := range spl.Data {
+
+						if len(lkey) > 10 && lkey[:11] == "trace.link." {
+							continue
+						}
+						if slices.Contains(already_used_fields, lkey) {
+							continue
+						}
+						if lkey == "meta.annotation_type" || lkey == "meta.signal_type" {
+							continue
+						}
+						switch lval := lval.(type) {
+						case string:
+							newLink.Attributes().PutStr(lkey, lval)
+						case int:
+							newLink.Attributes().PutInt(lkey, int64(lval))
+						case int64, int16, int32:
+							intv := lval.(int64)
+							newLink.Attributes().PutInt(lkey, intv)
+						case float64:
+							newLink.Attributes().PutDouble(lkey, lval)
+						case bool:
+							newLink.Attributes().PutBool(lkey, lval)
+						default:
+							logger.Error("SpanLink data type issue", zap.String("trace.trace_id", sp.TraceID().String()), zap.String("trace.span_id", sp.SpanID().String()), zap.String("key", lkey))
+						}
 					}
 				}
 			}
 		}
 	}
+	logger.Debug("time to reattach span events and links", zap.Duration("duration", time.Since(start)))
 
-	results := ptrace.NewTraces()
-	rs := results.ResourceSpans().AppendEmpty()
-	rs.SetSchemaUrl(semconv.SchemaURL)
-	// sharedAttributes.CopyTo(rs.Resource().Attributes())
-	rs.Resource().Attributes().PutStr(semconv.AttributeServiceName, foundServiceName)
+	resultTraces := ptrace.NewTraces()
+	resultLogs := plog.NewLogs()
 
-	in := rs.ScopeSpans().AppendEmpty()
-	in.Scope().SetName(foundLibraryName)
-	in.Scope().SetVersion(foundLibraryVersion)
-	slice.CopyTo(in.Spans())
+	for scopeName, ss := range foundScopes.Scope {
+		// make a slice and load it up with scopes
+		if ss.ScopeSpans.Len() > 0 {
+			rs := resultTraces.ResourceSpans().AppendEmpty()
+			rs.SetSchemaUrl(semconv.SchemaURL)
+			rs.Resource().Attributes().PutStr(semconv.AttributeServiceName, ss.ServiceName)
 
-	return results, nil
+			in := rs.ScopeSpans().AppendEmpty()
+			in.Scope().SetName(ss.LibraryName)
+			in.Scope().SetVersion(ss.LibraryVersion)
+			foundScopes.Scope[scopeName].ScopeSpans.MoveAndAppendTo(in.Spans())
+		}
+		if ss.ScopeLogs.Len() > 0 {
+			lr := resultLogs.ResourceLogs().AppendEmpty()
+			lr.SetSchemaUrl(semconv.SchemaURL)
+			lr.Resource().Attributes().PutStr(semconv.AttributeServiceName, ss.ServiceName)
+
+			ls := lr.ScopeLogs().AppendEmpty()
+			ls.Scope().SetName(ss.LibraryName)
+			ls.Scope().SetVersion(ss.LibraryVersion)
+			foundScopes.Scope[scopeName].ScopeLogs.MoveAndAppendTo(ls.LogRecords())
+		}
+	}
+
+	return resultTraces, resultLogs, nil
 }
